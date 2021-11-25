@@ -14,10 +14,8 @@ import (
 )
 
 const (
-	statusActive          = "Active"
-	statusError           = "Error"
-	policyTypeDeletion    = "deletion"
-	policyTypeAutoScaling = "autoscaling"
+	statusActive = "Active"
+	statusError  = "Error"
 )
 
 const (
@@ -188,14 +186,15 @@ type ASTask struct {
 
 // ASMetadata - Medata of an auto scaling group
 type ASMetadata struct {
-	DeletionPolicy   string       `json:"deletion_policy"`
+	Alarms           ASAlarms     `json:"alarms"`
+	DeletionPolicy   []string     `json:"deletion_policy"`
 	ScaleInReceiver  string       `json:"scale_in_receiver"`
 	ScaleOutReceiver string       `json:"scale_out_receiver"`
 	WebhookIDs       ASWebhookIDs `json:"webhook_ids"`
 }
 
-// ScalePolicy - information about a scale policy
-type ScalePolicy struct {
+// ScalePolicyInformation - information about a scale policy
+type ScalePolicyInformation struct {
 	BestEffort bool    `json:"best_effort"`
 	CoolDown   int     `json:"cooldown"`
 	Event      string  `json:"event,omitempty"`
@@ -247,29 +246,18 @@ type LoadBalancersPolicyUpdateRequest struct {
 	Threshold     int                       `json:"threshold,omitempty"`
 }
 
-// PolicyAutoScalingCreateRequest represents payload use create a  policy
-type PolicyAutoScalingCreateRequest struct {
-	CoolDown   int    `json:"cooldown,omitempty"`
-	Event      string `json:"event,omitempty"`
-	MetricType string `json:"metric,omitempty"`
-	RangeTime  int    `json:"range_time,omitempty"`
-	ScaleSize  int    `json:"number,omitempty"`
-	Threshold  int    `json:"threshold,omitempty"`
-	Type       string `json:"policy_type,omitempty"`
-}
-
-// PolicyDeletionCreateRequest represents payload use create a  policy
-type PolicyDeletionCreateRequest struct {
+// HooksPolicyCreateRequest represents payload use create a deletion policy
+type HooksPolicyCreateRequest struct {
 	Criteria              string               `json:"criteria,omitempty"`
 	DestroyAfterDeletion  bool                 `json:"destroy_after_deletion,omitempty"`
 	GracePeriod           int                  `json:"grace_period,omitempty"`
 	Hooks                 DeleteionPolicyHooks `json:"hooks,omitempty"`
 	ReduceDesiredCapacity bool                 `json:"reduce_desired_capacity,omitempty"`
-	Type                  string               `json:"policy_type,omitempty"`
+	Type                  string               `json:"policy_type"`
 }
 
-// PolicyAutoScalingUpdateRequest represents payload use update a  policy
-type PolicyAutoScalingUpdateRequest struct {
+// PolicyCreateRequest represents payload use create a  policy
+type PolicyCreateRequest struct {
 	CoolDown   int    `json:"cooldown,omitempty"`
 	Event      string `json:"event,omitempty"`
 	MetricType string `json:"metric,omitempty"`
@@ -278,14 +266,14 @@ type PolicyAutoScalingUpdateRequest struct {
 	Threshold  int    `json:"threshold,omitempty"`
 }
 
-// PolicyDeletionUpdateRequest represents payload use update a  policy
-type PolicyDeletionUpdateRequest struct {
-	Criteria              string               `json:"criteria,omitempty"`
-	DestroyAfterDeletion  bool                 `json:"destroy_after_deletion,omitempty"`
-	GracePeriod           int                  `json:"grace_period,omitempty"`
-	Hooks                 DeleteionPolicyHooks `json:"hooks,omitempty"`
-	ReduceDesiredCapacity bool                 `json:"reduce_desired_capacity,omitempty"`
-	Type                  string               `json:"policy_type,omitempty"`
+// PolicyUpdateRequest represents payload use update a  policy
+type PolicyUpdateRequest struct {
+	CoolDown   int    `json:"cooldown,omitempty"`
+	Event      string `json:"event,omitempty"`
+	MetricType string `json:"metric,omitempty"`
+	RangeTime  int    `json:"range_time,omitempty"`
+	ScaleSize  int    `json:"number,omitempty"`
+	Threshold  int    `json:"threshold,omitempty"`
 }
 
 // TaskResponses is responses
@@ -296,15 +284,12 @@ type TaskResponses struct {
 
 // DeletionInformation - represents a deletion policy
 type DeletionInformation struct {
-	Criteria              string               `json:"criteria"`
-	DestroyAfterDeletion  bool                 `json:"destroy_after_deletion,omitempty"`
-	GracePeriod           int                  `json:"grace_period,omitempty"`
-	Hooks                 DeleteionPolicyHooks `json:"hooks,omitempty"`
-	ReduceDesiredCapacity bool                 `json:"reduce_desired_capacity,omitempty"`
+	ID    string               `json:"id"`
+	Hooks DeleteionPolicyHooks `json:"hooks"`
 }
 
-// LoadBalancerPolicy - information of load balancer will be use for auto scaling group
-type LoadBalancerPolicy struct {
+// LoadBalancerPolicyInformation - information of load balancer will be use for auto scaling group
+type LoadBalancerPolicyInformation struct {
 	LoadBalancerID   string `json:"id"`
 	LoadBalancerName string `json:"name,omitempty"`
 	ServerGroupID    string `json:"server_group_id"`
@@ -314,58 +299,58 @@ type LoadBalancerPolicy struct {
 
 // AutoScalingPolicies - information of policies using for auto scaling group
 type AutoScalingPolicies struct {
-	ScaleInPolicies      []ScalePolicy       `json:"scale_in_policy,omitempty"`
-	ScaleOutPolicies     []ScalePolicy       `json:"scale_out_policy,omitempty"`
-	LoadBalancerPolicies LoadBalancerPolicy  `json:"load_balancer_policy,omitempty"`
-	DeletionPolicy       DeletionInformation `json:"deletion_policy,omitempty"`
-	DoingTasks           []string            `json:"doing_task,omitempty"`
+	ScaleInPolicyInformations      []ScalePolicyInformation      `json:"scale_in_info,omitempty"`
+	ScaleOutPolicyInformations     []ScalePolicyInformation      `json:"scale_out_info,omitempty"`
+	LoadBalancerPolicyInformations LoadBalancerPolicyInformation `json:"load_balancer_info,omitempty"`
+	DeletionPolicyInformations     DeletionInformation           `json:"deletion_info,omitempty"`
+	DoingTasks                     []string                      `json:"doing_task,omitempty"`
 }
 
 // AutoScalingGroupCreateRequest - payload use to create auto scaling group
 type AutoScalingGroupCreateRequest struct {
-	DeletionPolicy       *PolicyDeletionCreateRequest `json:"deletion_policy,omitempty"`
-	DesiredCapacity      int                          `json:"desired_capacity"`
-	LoadBalancerPolicies *LoadBalancerPolicy          `json:"load_balancer_policy,omitempty"`
-	MaxSize              int                          `json:"max_size"`
-	MinSize              int                          `json:"min_size"`
-	Name                 string                       `json:"name"`
-	ProfileID            string                       `json:"profile_id"`
-	ScaleInPolicies      *[]ScalePolicy               `json:"scale_in_policy,omitempty"`
-	ScaleOutPolicies     *[]ScalePolicy               `json:"scale_out_policy,omitempty"`
+	DeletionPolicyInformations     *DeletionInformation           `json:"deletion_info,omitempty"`
+	DesiredCapacity                int                            `json:"desired_capacity"`
+	LoadBalancerPolicyInformations *LoadBalancerPolicyInformation `json:"load_balancer_info,omitempty"`
+	MaxSize                        int                            `json:"max_size"`
+	MinSize                        int                            `json:"min_size"`
+	Name                           string                         `json:"name"`
+	ProfileID                      string                         `json:"profile_id"`
+	ScaleInPolicyInformations      *[]ScalePolicyInformation      `json:"scale_in_info,omitempty"`
+	ScaleOutPolicyInformations     *[]ScalePolicyInformation      `json:"scale_out_info,omitempty"`
 }
 
 // AutoScalingGroupUpdateRequest - payload use to update auto scaling group
 type AutoScalingGroupUpdateRequest struct {
-	DesiredCapacity      int                 `json:"desired_capacity"`
-	LoadBalancerPolicies *LoadBalancerPolicy `json:"load_balancer_policy,omitempty"`
-	MaxSize              int                 `json:"max_size"`
-	MinSize              int                 `json:"min_size"`
-	Name                 string              `json:"name"`
-	ProfileID            string              `json:"profile_id"`
-	ProfileOnly          bool                `json:"profile_only"`
+	DesiredCapacity                int                            `json:"desired_capacity"`
+	LoadBalancerPolicyInformations *LoadBalancerPolicyInformation `json:"load_balancer_info,omitempty"`
+	MaxSize                        int                            `json:"max_size"`
+	MinSize                        int                            `json:"min_size"`
+	Name                           string                         `json:"name"`
+	ProfileID                      string                         `json:"profile_id"`
+	ProfileOnly                    bool                           `json:"profile_only"`
 }
 
 // AutoScalingGroup - is represents an auto scaling group
 type AutoScalingGroup struct {
-	Created              string                 `json:"created_at"`
-	Data                 map[string]interface{} `json:"data"`
-	DeletionPolicy       DeletionInformation    `json:"deletion_policy,omitempty"`
-	DesiredCapacity      int                    `json:"desired_capacity"`
-	ID                   string                 `json:"id"`
-	LoadBalancerPolicies LoadBalancerPolicy     `json:"load_balancer_policy,omitempty"`
-	MaxSize              int                    `json:"max_size"`
-	Metadata             ASMetadata             `json:"metadata"`
-	MinSize              int                    `json:"min_size"`
-	Name                 string                 `json:"name"`
-	NodeIDs              []string               `json:"node_ids"`
-	ProfileID            string                 `json:"profile_id"`
-	ProfileName          string                 `json:"profile_name"`
-	ScaleInPolicies      []ScalePolicy          `json:"scale_in_policy,omitempty"`
-	ScaleOutPolicies     []ScalePolicy          `json:"scale_out_policy,omitempty"`
-	Status               string                 `json:"status"`
-	TaskID               string                 `json:"task_id,omitempty"`
-	Timeout              int                    `json:"timeout"`
-	Updated              string                 `json:"updated_at"`
+	Created                        string                        `json:"created_at"`
+	Data                           map[string]interface{}        `json:"data"`
+	DeletionPolicyInformations     DeletionInformation           `json:"deletion_info,omitempty"`
+	DesiredCapacity                int                           `json:"desired_capacity"`
+	ID                             string                        `json:"id"`
+	LoadBalancerPolicyInformations LoadBalancerPolicyInformation `json:"load_balancer_info,omitempty"`
+	MaxSize                        int                           `json:"max_size"`
+	Metadata                       ASMetadata                    `json:"metadata"`
+	MinSize                        int                           `json:"min_size"`
+	Name                           string                        `json:"name"`
+	NodeIDs                        []string                      `json:"node_ids"`
+	ProfileID                      string                        `json:"profile_id"`
+	ProfileName                    string                        `json:"profile_name"`
+	ScaleInPolicyInformations      []ScalePolicyInformation      `json:"scale_in_info,omitempty"`
+	ScaleOutPolicyInformations     []ScalePolicyInformation      `json:"scale_out_info,omitempty"`
+	Status                         string                        `json:"status"`
+	TaskID                         string                        `json:"task_id,omitempty"`
+	Timeout                        int                           `json:"timeout"`
+	Updated                        string                        `json:"updated_at"`
 }
 
 // AutoScalingDataDisk is represents for a data disk being created with servers
@@ -444,7 +429,7 @@ type AutoScalingNode struct {
 	PhysicalID   string                 `json:"physical_id"`
 	StatusReason string                 `json:"status_reason"`
 	ID           string                 `json:"id"`
-	Addresses    map[string]interface{} `json:"addresses,omitempty"`
+	Addresses    map[string]interface{} `json:"addresses"`
 }
 
 // AutoScalingNodesDelete is represents a list cloud server being deleted
@@ -500,15 +485,14 @@ type AutoScalingSchdeuleCreateRequest struct {
 
 // AutoScalingSchdeule - cron triggers to do time-based scale
 type AutoScalingSchdeule struct {
-	ClusterID         string                    `json:"cluster_id"`
-	Created           string                    `json:"created_at"`
-	ID                string                    `json:"_id"`
-	Name              string                    `json:"name"`
-	Sizing            AutoScalingSchdeuleSizing `json:"sizing"`
-	Status            string                    `json:"status"`
-	TaskID            string                    `json:"task_id"`
-	Valid             AutoScalingSchdeuleValid  `json:"valid"`
-	NextExecutionTime string                    `json:"next_execution_time"`
+	ClusterID string                    `json:"cluster_id"`
+	Created   string                    `json:"created_at"`
+	ID        string                    `json:"_id"`
+	Name      string                    `json:"name"`
+	Sizing    AutoScalingSchdeuleSizing `json:"sizing"`
+	Status    string                    `json:"status"`
+	TaskID    string                    `json:"task_id"`
+	Valid     AutoScalingSchdeuleValid  `json:"valid"`
 }
 
 // Auto Scaling Group path
@@ -730,7 +714,7 @@ func (p *policy) List(ctx context.Context, clusterID string) (*AutoScalingPolici
 	return data, nil
 }
 
-func (n *node) List(ctx context.Context, clusterID string, all bool) ([]*AutoScalingNode, error) {
+func (n *node) List(ctx context.Context, clusterID string) ([]*AutoScalingNode, error) {
 	if clusterID == "" {
 		return nil, errors.New("Auto Scaling Group ID is required")
 	}
@@ -739,13 +723,6 @@ func (n *node) List(ctx context.Context, clusterID string, all bool) ([]*AutoSca
 	if err != nil {
 		return nil, err
 	}
-
-	if all {
-		q := req.URL.Query()
-		q.Add("all", "true")
-		req.URL.RawQuery = q.Encode()
-	}
-
 	resp, err := n.client.Do(ctx, req)
 	if err != nil {
 		return nil, err
@@ -909,7 +886,7 @@ func (s *schedule) Get(ctx context.Context, clusterID, scheduleID string) (*Auto
 	return data, nil
 }
 
-func (p *policy) Get(ctx context.Context, clusterID, PolicyID string) (*ScalePolicy, error) {
+func (p *policy) Get(ctx context.Context, clusterID, PolicyID string) (*ScalePolicyInformation, error) {
 	req, err := p.client.NewRequest(ctx, http.MethodGet, autoScalingServiceName, p.itemPath(clusterID, PolicyID), nil)
 	if err != nil {
 		return nil, err
@@ -920,7 +897,7 @@ func (p *policy) Get(ctx context.Context, clusterID, PolicyID string) (*ScalePol
 		return nil, err
 	}
 
-	data := &ScalePolicy{}
+	data := &ScalePolicyInformation{}
 
 	if err := json.NewDecoder(resp.Body).Decode(data); err != nil {
 		return nil, err
@@ -1048,8 +1025,7 @@ func (lc *launchConfiguration) Create(ctx context.Context, lcr *LaunchConfigurat
 	return data, nil
 }
 
-func (p *policy) CreateAutoScaling(ctx context.Context, clusterID string, pcr *PolicyAutoScalingCreateRequest) (*TaskResponses, error) {
-	pcr.Type = policyTypeAutoScaling
+func (p *policy) Create(ctx context.Context, clusterID string, pcr *PolicyCreateRequest) (*TaskResponses, error) {
 	req, err := p.client.NewRequest(ctx, http.MethodPost, autoScalingServiceName, p.resourcePath(clusterID), &pcr)
 	if err != nil {
 		return nil, err
@@ -1068,9 +1044,8 @@ func (p *policy) CreateAutoScaling(ctx context.Context, clusterID string, pcr *P
 	return data, nil
 }
 
-func (p *policy) CreateDeletion(ctx context.Context, clusterID string, pcr *PolicyDeletionCreateRequest) (*TaskResponses, error) {
-	pcr.Type = policyTypeDeletion
-	req, err := p.client.NewRequest(ctx, http.MethodPost, autoScalingServiceName, p.resourcePath(clusterID), &pcr)
+func (p *policy) CreateHooks(ctx context.Context, clusterID string, hpcr *HooksPolicyCreateRequest) (*TaskResponses, error) {
+	req, err := p.client.NewRequest(ctx, http.MethodPost, autoScalingServiceName, p.resourcePath(clusterID), &hpcr)
 	if err != nil {
 		return nil, err
 	}
@@ -1169,27 +1144,7 @@ func (p *policy) UpdateLoadBalancers(ctx context.Context, clusterID, PolicyID st
 	return data, nil
 }
 
-func (p *policy) UpdateAutoScaling(ctx context.Context, clusterID, PolicyID string, pur *PolicyAutoScalingUpdateRequest) (*TaskResponses, error) {
-	req, err := p.client.NewRequest(ctx, http.MethodPut, autoScalingServiceName, p.itemPath(clusterID, PolicyID), &pur)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := p.client.Do(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-
-	data := &TaskResponses{}
-
-	if err := json.NewDecoder(resp.Body).Decode(data); err != nil {
-		return nil, err
-	}
-	return data, nil
-}
-
-func (p *policy) UpdateDeletion(ctx context.Context, clusterID, PolicyID string, pur *PolicyDeletionUpdateRequest) (*TaskResponses, error) {
-	pur.Type = policyTypeDeletion
+func (p *policy) Update(ctx context.Context, clusterID, PolicyID string, pur *PolicyUpdateRequest) (*TaskResponses, error) {
 	req, err := p.client.NewRequest(ctx, http.MethodPut, autoScalingServiceName, p.itemPath(clusterID, PolicyID), &pur)
 	if err != nil {
 		return nil, err

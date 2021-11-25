@@ -52,37 +52,27 @@ type VPC struct {
 }
 
 type Subnet struct {
-	ID              string           `json:"id"`
-	Name            string           `json:"name"`
-	TenantID        string           `json:"tenant_id"`
-	NetworkID       string           `json:"network_id"`
-	IPVersion       int              `json:"ip_version"`
-	SubnetPoolID    string           `json:"subnet_pool_id"`
-	EnableDHCP      bool             `json:"enable_dhcp"`
-	IPv6RaMode      string           `json:"ipv6_ra_mode"`
-	IPv6AddressMode string           `json:"ipv6_address_mode"`
-	GatewayIP       string           `json:"gateway_ip"`
-	CIDR            string           `json:"cidr"`
-	AllocationPools []AllocationPool `json:"allocation_pools"`
-	HostRoutes      []HostRoute      `json:"host_routes"`
-	DNSNameServers  []string         `json:"dns_nameservers"`
-	Description     string           `json:"description"`
-	ServiceTypes    []string         `json:"service_types"`
-	Tags            []string         `json:"tags"`
-	CreatedAt       string           `json:"created_at"`
-	UpdatedAt       string           `json:"updated_at"`
-	RevisionNumber  int              `json:"revision_number"`
-	ProjectID       string           `json:"project_id"`
-}
-
-type HostRoute struct {
-	Destination string `json:"destination"`
-	NextHop     string `json:"nexthop"`
-}
-
-type AllocationPool struct {
-	Start string `json:"start"`
-	End   string `json:"end"`
+	ID              string              `json:"id"`
+	Name            string              `json:"name"`
+	TenantID        string              `json:"tenant_id"`
+	NetworkID       string              `json:"network_id"`
+	IPVersion       int                 `json:"ip_version"`
+	SubnetPoolID    string              `json:"subnet_pool_id"`
+	EnableDHCP      bool                `json:"enable_dhcp"`
+	IPv6RaMode      string              `json:"ipv6_ra_mode"`
+	IPv6AddressMode string              `json:"ipv6_address_mode"`
+	GatewayIP       string              `json:"gateway_ip"`
+	CIDR            string              `json:"cidr"`
+	AllocationPools []map[string]string `json:"allocation_pools"`
+	HostRoutes      []string            `json:"host_routes"`
+	DNSNameServers  []string            `json:"dns_nameservers"`
+	Description     string              `json:"description"`
+	ServiceTypes    []string            `json:"service_types"`
+	Tags            []string            `json:"tags"`
+	CreatedAt       string              `json:"created_at"`
+	UpdatedAt       string              `json:"updated_at"`
+	RevisionNumber  int                 `json:"revision_number"`
+	ProjectID       string              `json:"project_id"`
 }
 
 type CreateVPCPayload struct {
@@ -129,7 +119,9 @@ func (v vpcService) Get(ctx context.Context, vpcID string) (*VPC, error) {
 	if err != nil {
 		return nil, err
 	}
-	var data *VPC
+	var data *struct {
+		Network *VPC `json:"network"`
+	}
 	resp, err := v.client.Do(ctx, req)
 	if err != nil {
 		return nil, err
@@ -138,7 +130,7 @@ func (v vpcService) Get(ctx context.Context, vpcID string) (*VPC, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return nil, err
 	}
-	return data, nil
+	return data.Network, nil
 }
 
 func (v vpcService) Update(ctx context.Context, vpcID string, uvpl *UpdateVPCPayload) (*VPC, error) {
@@ -146,7 +138,9 @@ func (v vpcService) Update(ctx context.Context, vpcID string, uvpl *UpdateVPCPay
 	if err != nil {
 		return nil, err
 	}
-	var data *VPC
+	var data *struct {
+		Network *VPC `json:"network"`
+	}
 	resp, err := v.client.Do(ctx, req)
 	if err != nil {
 		return nil, err
@@ -155,7 +149,7 @@ func (v vpcService) Update(ctx context.Context, vpcID string, uvpl *UpdateVPCPay
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return nil, err
 	}
-	return data, nil
+	return data.Network, nil
 }
 
 func (v vpcService) Create(ctx context.Context, cvpl *CreateVPCPayload) (*VPC, error) {

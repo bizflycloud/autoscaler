@@ -10,8 +10,7 @@ import (
 )
 
 const (
-	zonesPath  = "/zones"
-	zonePath   = "/zone"
+	zonePath   = "/zones"
 	recordPath = "/record"
 )
 
@@ -23,10 +22,10 @@ var _ DNSService = (*dnsService)(nil)
 
 type DNSService interface {
 	ListZones(ctx context.Context, opts *ListOptions) (*ListZoneResp, error)
-	CreateZone(ctx context.Context, czpl *CreateZonePayload) (*ExtendedZone, error)
+	CreateZone(ctx context.Context, czpl *createZonePayload) (*ExtendedZone, error)
 	GetZone(ctx context.Context, zoneID string) (*ExtendedZone, error)
 	DeleteZone(ctx context.Context, zoneID string) error
-	CreateRecord(ctx context.Context, zoneID string, crpl interface{}) (*Record, error)
+	CreateRecord(ctx context.Context, zoneID string, crpl *CreateRecordPayload) (*Record, error)
 	GetRecord(ctx context.Context, recordID string) (*Record, error)
 	UpdateRecord(ctx context.Context, recordID string, urpl *UpdateRecordPayload) (*ExtendedRecord, error)
 	DeleteRecord(ctx context.Context, recordID string) error
@@ -42,28 +41,22 @@ type Zone struct {
 	NameServer []string `json:"nameserver"`
 	TTL        int      `json:"ttl"`
 	Active     bool     `json:"active"`
-}
-
-type WrappedZonePayload struct {
-	Zones *CreateZonePayload `json:"zones"`
-}
-
-type WrappedRecordPayload struct {
-	Record interface{} `json:"record"`
+	RecordsSet []string `json:"records_set"`
 }
 
 type ExtendedZone struct {
 	Zone
-	RecordsSet []RecordSet `json:"record_set"`
+	RecordsSet []RecordSet `json:"records_set"`
 }
 
 type RecordSet struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Type string `json:"type"`
-	TTL  string `json:"ttl"`
+	ID                string            `json:"id"`
+	Name              string            `json:"name"`
+	Type              string            `json:"type"`
+	TTL               int               `json:"ttl"`
+	Data              []string          `json:"data"`
+	RoutingPolicyData RoutingPolicyData `json:"routing_policy_data"`
 }
-
 type Meta struct {
 	MaxResults int `json:"max_results"`
 	Total      int `json:"total"`
@@ -75,7 +68,7 @@ type ListZoneResp struct {
 	Meta  Meta   `json:"_meta"`
 }
 
-type CreateZonePayload struct {
+type createZonePayload struct {
 	Name        string `json:"name"`
 	Required    bool   `json:"required,omitempty"`
 	Description string `json:"description,omitempty"`
@@ -88,68 +81,43 @@ type Addrs struct {
 	USA []string `json:"USA"`
 }
 type RoutingData struct {
-	AddrsV4 Addrs `json:"addrs_v4,omitempty"`
-	AddrsV6 Addrs `json:"addrs_v6,omitempty"`
+	AddrsV4 Addrs `json:"addrs_v4"`
+	AddrsV6 Addrs `json:"addrs_v6"`
 }
 
 type RoutingPolicyData struct {
 	RoutingData RoutingData `json:"routing_data,omitempty"`
-	HealthCheck HealthCheck `json:"healthcheck,omitempty"`
+	HealthCheck struct {
+		TCPConnect struct {
+			TCPPort int `json:"tcp_port"`
+		} `json:"tcp_connect,omitempty"`
+		HTTPStatus struct {
+			HTTPPort int    `json:"http_port"`
+			URLPath  string `json:"url_path"`
+			VHost    string `json:"vhost"`
+			OkCodes  []int  `json:"ok_codes"`
+			Interval int    `json:"internal"`
+		} `json:"http_status,omitempty"`
+	} `json:"healthcheck,omitempty"`
 }
 
-type HealthCheck struct {
-	TCPConnect TCPHealthCheck  `json:"tcp_connect,omitempty"`
-	HTTPStatus HTTPHealthCheck `json:"http_status,omitempty"`
-}
-
-type TCPHealthCheck struct {
-	TCPPort int `json:"tcp_port,omitempty"`
-}
-
-type HTTPHealthCheck struct {
-	HTTPPort int    `json:"http_port,omitempty"`
-	URLPath  string `json:"url_path,omitempty"`
-	VHost    string `json:"vhost,omitempty"`
-	OkCodes  []int  `json:"ok_codes,omitempty"`
-	Interval int    `json:"interval,omitempty"`
-}
-
-type BaseCreateRecordPayload struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
-	TTL  int    `json:"ttl"`
-}
-
-type CreateNormalRecordPayload struct {
-	BaseCreateRecordPayload
-	Data []string `json:"data"`
-}
-
-type CreatePolicyRecordPayload struct {
-	BaseCreateRecordPayload
+type CreateRecordPayload struct {
+	Name              string            `json:"name"`
+	Type              string            `json:"type"`
+	TTL               int               `json:"ttl"`
+	Data              []string          `json:"data"`
 	RoutingPolicyData RoutingPolicyData `json:"routing_policy_data"`
-}
-
-type CreateMXRecordPayload struct {
-	BaseCreateRecordPayload
-	Data []MXData `json:"data"`
-}
-
-type MXData struct {
-	Value    string `json:"value"`
-	Priority int    `json:"priority"`
 }
 
 type RecordData struct {
 	Value    string `json:"value"`
 	Priority int    `json:"priority"`
 }
-
 type UpdateRecordPayload struct {
 	Name              string            `json:"name,omitempty"`
 	Type              string            `json:"type,omitempty"`
 	TTL               int               `json:"ttl,omitempty"`
-	Data              []MXData          `json:"data,omitempty"`
+	Data              []RecordData      `json:"data,omitempty"`
 	RoutingPolicyData RoutingPolicyData `json:"routing_policy_data,omitempty"`
 }
 
@@ -163,7 +131,7 @@ type Record struct {
 	ZoneID            string            `json:"zone_id"`
 	Type              string            `json:"type"`
 	TTL               int               `json:"ttl"`
-	Data              []interface{}     `json:"data"`
+	Data              []string          `json:"data"`
 	RoutingPolicyData RoutingPolicyData `json:"routing_policy_data"`
 }
 
@@ -177,7 +145,7 @@ type Records struct {
 }
 
 func (d dnsService) resourcePath() string {
-	return zonesPath
+	return zonePath
 }
 
 func (d dnsService) zoneItemPath(id string) string {
@@ -205,11 +173,8 @@ func (d *dnsService) ListZones(ctx context.Context, opts *ListOptions) (*ListZon
 	return data, nil
 }
 
-func (d *dnsService) CreateZone(ctx context.Context, czpl *CreateZonePayload) (*ExtendedZone, error) {
-	payload := WrappedZonePayload{
-		Zones: czpl,
-	}
-	req, err := d.client.NewRequest(ctx, http.MethodPost, dnsName, d.resourcePath(), payload)
+func (d *dnsService) CreateZone(ctx context.Context, czpl *createZonePayload) (*ExtendedZone, error) {
+	req, err := d.client.NewRequest(ctx, http.MethodPost, dnsName, d.resourcePath(), czpl)
 	if err != nil {
 		return nil, err
 	}
@@ -254,11 +219,8 @@ func (d *dnsService) DeleteZone(ctx context.Context, zoneID string) error {
 	return resp.Body.Close()
 }
 
-func (d *dnsService) CreateRecord(ctx context.Context, zoneID string, crpl interface{}) (*Record, error) {
-	payload := WrappedRecordPayload{
-		Record: crpl,
-	}
-	req, err := d.client.NewRequest(ctx, http.MethodPost, dnsName, strings.Join([]string{d.zoneItemPath(zoneID), "record"}, "/"), &payload)
+func (d *dnsService) CreateRecord(ctx context.Context, zoneID string, crpl *CreateRecordPayload) (*Record, error) {
+	req, err := d.client.NewRequest(ctx, http.MethodPost, dnsName, strings.Join([]string{d.zoneItemPath(zoneID), "record"}, "/"), crpl)
 	if err != nil {
 		return nil, err
 	}
@@ -267,13 +229,11 @@ func (d *dnsService) CreateRecord(ctx context.Context, zoneID string, crpl inter
 		return nil, err
 	}
 	defer resp.Body.Close()
-	var data *struct {
-		Record *Record `json:"record"`
-	}
+	var data *Record
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return nil, err
 	}
-	return data.Record, nil
+	return data, nil
 }
 
 func (d *dnsService) GetRecord(ctx context.Context, recordID string) (*Record, error) {
@@ -286,13 +246,11 @@ func (d *dnsService) GetRecord(ctx context.Context, recordID string) (*Record, e
 		return nil, err
 	}
 	defer resp.Body.Close()
-	var data *struct {
-		Record *Record `json:"record"`
-	}
+	var data *Record
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return nil, err
 	}
-	return data.Record, nil
+	return data, nil
 }
 
 func (d *dnsService) UpdateRecord(ctx context.Context, recordID string, urpl *UpdateRecordPayload) (*ExtendedRecord, error) {
