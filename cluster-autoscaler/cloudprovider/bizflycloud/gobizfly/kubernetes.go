@@ -16,6 +16,7 @@ import (
 const (
 	clusterPath = "/_"
 	kubeConfig  = "kubeconfig"
+	k8sVersion  = "/k8s_versions"
 )
 
 var _ KubernetesEngineService = (*kubernetesEngineService)(nil)
@@ -36,6 +37,7 @@ type KubernetesEngineService interface {
 	UpdateClusterWorkerPool(ctx context.Context, clusterUID string, PoolID string, uwp *UpdateWorkerPoolRequest) error
 	DeleteClusterWorkerPoolNode(ctx context.Context, clusterUID string, PoolID string, NodeID string) error
 	GetKubeConfig(ctx context.Context, clusterUID string) (string, error)
+	GetKubernetesVersion(ctx context.Context) (*KubernetesVersionResp, error)
 }
 
 type WorkerPool struct {
@@ -58,6 +60,11 @@ type ControllerVersion struct {
 	Name        string `json:"name,omitempty" yaml:"name,omitempty"`
 	Description string `json:"description" yaml:"description"`
 	K8SVersion  string `json:"kubernetes_version" yaml:"kubernetes_version"`
+}
+
+type KubernetesVersionResp struct {
+	ControllerVersions []ControllerVersion `json:"controller_versions"`
+	WorkerVersion      []string            `json:"worker_versions"`
 }
 
 type Clusters struct {
@@ -136,10 +143,11 @@ type WorkerPoolWithNodes struct {
 }
 
 type UpdateWorkerPoolRequest struct {
-	DesiredSize       int  `json:"desired_size,omitempty" yaml:"desired_size,omitempty"`
-	EnableAutoScaling bool `json:"enable_autoscaling,omitempty" yaml:"enable_autoscaling,omitempty"`
-	MinSize           int  `json:"min_size,omitempty" yaml:"min_size,omitempty"`
-	MaxSize           int  `json:"max_size,omitempty" yaml:"max_size,omitempty"`
+	DesiredSize       int    `json:"desired_size,omitempty" yaml:"desired_size,omitempty"`
+	EnableAutoScaling bool   `json:"enable_autoscaling,omitempty" yaml:"enable_autoscaling,omitempty"`
+	MinSize           int    `json:"min_size,omitempty" yaml:"min_size,omitempty"`
+	MaxSize           int    `json:"max_size,omitempty" yaml:"max_size,omitempty"`
+	UpdateStrategy    string `json:"update_strategy,omitempty" yaml:"update_strategy,omitempty`
 }
 
 func (c *kubernetesEngineService) resourcePath() string {
@@ -324,4 +332,22 @@ func (c *kubernetesEngineService) GetKubeConfig(ctx context.Context, clusterUID 
 	}
 	bodyString := string(bodyBytes)
 	return bodyString, nil
+}
+
+func (c *kubernetesEngineService) GetKubernetesVersion(ctx context.Context) (*KubernetesVersionResp, error) {
+	req, err := c.client.NewRequest(ctx, http.MethodGet, kubernetesServiceName, k8sVersion, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.client.Do(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var data *KubernetesVersionResp
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil, err
+	}
+	return data, nil
 }

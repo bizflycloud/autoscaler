@@ -60,6 +60,10 @@ type Flavor struct {
 	VCPU int    `json:"vcpu"`
 }
 
+type DeletedVolumes struct {
+	Ids []string `json:"delete_volume"`
+}
+
 // Server contains server information.
 type Server struct {
 	ID               string                 `json:"id"`
@@ -75,6 +79,7 @@ type Server struct {
 	Addresses        map[string]interface{} `json:"addresses"` // Deprecated: This field will be removed in the near future
 	Metadata         map[string]string      `json:"metadata"`
 	Flavor           Flavor                 `json:"flavor"`
+	FlavorName       string                 `json:"flavor_name"`
 	Progress         int                    `json:"progress"`
 	AttachedVolumes  []AttachedVolume       `json:"os-extended-volumes:volumes_attached"`
 	AvailabilityZone string                 `json:"OS-EXT-AZ:availability_zone"`
@@ -143,7 +148,7 @@ type ServerService interface {
 	List(ctx context.Context, opts *ListOptions) ([]*Server, error)
 	Create(ctx context.Context, scr *ServerCreateRequest) (*ServerCreateResponse, error)
 	Get(ctx context.Context, id string) (*Server, error)
-	Delete(ctx context.Context, id string) error
+	Delete(ctx context.Context, id string, deletedRootDisk []string) error
 	Resize(ctx context.Context, id string, newFlavor string) (*ServerTask, error)
 	Start(ctx context.Context, id string) (*Server, error)
 	Stop(ctx context.Context, id string) (*Server, error)
@@ -219,6 +224,9 @@ type ServerCreateRequest struct {
 	AvailabilityZone string        `json:"availability_zone"`
 	OS               *ServerOS     `json:"os"`
 	Quantity         int           `json:"quantity,omitempty"`
+	NetworkInterface []string      `json:"network_interfaces,omitempty"`
+	Firewalls        []string      `json:"firewalls,omitempty"`
+	NetworkPlan      string        `json:"network_plan,omitempty"`
 }
 
 // itemActionPath return http path of server action
@@ -292,8 +300,11 @@ func (s *server) Get(ctx context.Context, id string) (*Server, error) {
 }
 
 // Delete deletes a server.
-func (s *server) Delete(ctx context.Context, id string) error {
-	req, err := s.client.NewRequest(ctx, http.MethodDelete, serverServiceName, serverBasePath+"/"+id, nil)
+func (s *server) Delete(ctx context.Context, id string, deletedRootDisk []string) error {
+	deletedVolumes := &DeletedVolumes{
+		Ids: deletedRootDisk,
+	}
+	req, err := s.client.NewRequest(ctx, http.MethodDelete, serverServiceName, serverBasePath+"/"+id, deletedVolumes)
 	if err != nil {
 		return err
 	}

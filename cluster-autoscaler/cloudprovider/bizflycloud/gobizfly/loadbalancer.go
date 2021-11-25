@@ -36,11 +36,12 @@ type LoadBalancerService interface {
 
 // LoadBalancerCreateRequest represents create new load balancer request payload.
 type LoadBalancerCreateRequest struct {
-	Description string   `json:"description,omitempty"`
-	Type        string   `json:"type"`
-	Listeners   []string `json:"listeners,omitempty"`
-	Name        string   `json:"name"`
-	NetworkType string   `json:"network_type"`
+	Description  string   `json:"description,omitempty"`
+	Type         string   `json:"type"`
+	Listeners    []string `json:"listeners,omitempty"`
+	Name         string   `json:"name"`
+	NetworkType  string   `json:"network_type"`
+	VPCNetworkID string   `json:"vip_network_id"`
 }
 
 // LoadBalancerUpdateRequest represents update load balancer request payload.
@@ -344,7 +345,7 @@ func (l *listener) Get(ctx context.Context, id string) (*Listener, error) {
 
 func (l *listener) Update(ctx context.Context, id string, lur *ListenerUpdateRequest) (*Listener, error) {
 	var data struct {
-		Listener *ListenerUpdateRequest
+		Listener *ListenerUpdateRequest `json:"listener"`
 	}
 	data.Listener = lur
 	req, err := l.client.NewRequest(ctx, http.MethodPut, loadBalancerServiceName, l.itemPath(id), &data)
@@ -389,16 +390,26 @@ type MemberService interface {
 	Update(ctx context.Context, poolID, id string, req *MemberUpdateRequest) (*Member, error)
 	Delete(ctx context.Context, poolID, id string) error
 	Create(ctx context.Context, poolID string, req *MemberCreateRequest) (*Member, error)
+	BatchUpdate(ctx context.Context, poolID string, members *BatchMemberUpdateRequest) error
 }
 
 // MemberUpdateRequest represents update member request payload.
 type MemberUpdateRequest struct {
-	Name           string  `json:"name"`
-	Weight         int     `json:"weight"`
-	AdminStateUp   bool    `json:"admin_state_up"`
-	MonitorAddress *string `json:"monitor_address"`
-	MonitorPort    *int    `json:"monitor_port"`
-	Backup         bool    `json:"backup"`
+	Name           string `json:"name"`
+	Weight         int    `json:"weight,omitempty"`
+	MonitorAddress string `json:"monitor_address,omitempty"`
+	MonitorPort    int    `json:"monitor_port,omitempty"`
+	Backup         bool   `json:"backup,omitempty"`
+}
+
+type ExtendMemberUpdateRequest struct {
+	MemberUpdateRequest
+	Address      string `json:"address"`
+	ProtocolPort int    `json:"protocol_port"`
+}
+
+type BatchMemberUpdateRequest struct {
+	Members []ExtendMemberUpdateRequest `json:"members"`
 }
 
 // MemberCreateRequest represents create member request payload
@@ -509,6 +520,19 @@ func (m *member) Update(ctx context.Context, poolID, id string, mur *MemberUpdat
 	return respData.Member, nil
 }
 
+func (m *member) BatchUpdate(ctx context.Context, poolID string, members *BatchMemberUpdateRequest) error {
+	req, err := m.client.NewRequest(ctx, http.MethodPut, loadBalancerServiceName, m.resourcePath(poolID), &members)
+	if err != nil {
+		return err
+	}
+	resp, err := m.client.Do(ctx, req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return nil
+}
+
 func (m *member) Delete(ctx context.Context, poolID, id string) error {
 	req, err := m.client.NewRequest(ctx, http.MethodDelete, loadBalancerServiceName, m.itemPath(poolID, id), nil)
 	if err != nil {
@@ -570,10 +594,10 @@ type SessionPersistence struct {
 type PoolCreateRequest struct {
 	Description        *string             `json:"description,omitempty"`
 	LBAlgorithm        string              `json:"lb_algorithm"`
-	ListenerID         *string             `json:"listener_id"`
+	ListenerID         *string             `json:"listener_id,omitempty"`
 	Name               *string             `json:"name,omitempty"`
 	Protocol           string              `json:"protocol"`
-	SessionPersistence *SessionPersistence `json:"session_persistence"`
+	SessionPersistence *SessionPersistence `json:"session_persistence,omitempty"`
 }
 
 // PoolUpdateRequest represents update pool request payload.

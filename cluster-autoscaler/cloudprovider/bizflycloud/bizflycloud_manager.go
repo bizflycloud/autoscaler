@@ -134,7 +134,7 @@ func newManager(configReader io.Reader) (*Manager, error) {
 		return nil, fmt.Errorf("cannot create token: %w", err)
 	}
 
-	bizflyClient.SetKeystoneToken(token.KeystoneToken)
+	bizflyClient.SetKeystoneToken(token)
 	m := &Manager{
 		client:     bizflyClient.KubernetesEngine,
 		clusterID:  clusterID,
