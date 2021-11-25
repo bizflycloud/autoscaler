@@ -144,7 +144,8 @@ func (n *NodeGroup) DecreaseTargetSize(delta int) error {
 	}
 
 	req := &gobizfly.UpdateWorkerPoolRequest{
-		DesiredSize: targetSize,
+		DesiredSize:    targetSize,
+		UpdateStrategy: "target_only",
 	}
 
 	ctx := context.Background()
