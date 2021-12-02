@@ -144,8 +144,7 @@ func (n *NodeGroup) DecreaseTargetSize(delta int) error {
 	}
 
 	req := &gobizfly.UpdateWorkerPoolRequest{
-		DesiredSize:    targetSize,
-		UpdateStrategy: "target_only",
+		DesiredSize: targetSize,
 	}
 
 	ctx := context.Background()
@@ -250,16 +249,16 @@ func toInstanceStatus(nodeState gobizfly.PoolNode) *cloudprovider.InstanceStatus
 
 	st := &cloudprovider.InstanceStatus{}
 	switch nodeState.Status {
-	case "provisioning":
+	case "RECOVERING":
 		st.State = cloudprovider.InstanceCreating
-	case "running":
+	case "ACTIVE":
 		st.State = cloudprovider.InstanceRunning
-	case "draining", "deleting":
+	case "DELETING":
 		st.State = cloudprovider.InstanceDeleting
 	default:
 		st.ErrorInfo = &cloudprovider.InstanceErrorInfo{
 			ErrorClass:   cloudprovider.OtherErrorClass,
-			ErrorCode:    "no-code-bizflycloud",
+			ErrorCode:    nodeState.Status,
 			ErrorMessage: nodeState.StatusReason,
 		}
 	}
