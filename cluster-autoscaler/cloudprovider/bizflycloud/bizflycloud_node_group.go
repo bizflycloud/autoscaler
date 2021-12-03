@@ -250,9 +250,9 @@ func toInstanceStatus(nodeState gobizfly.PoolNode) *cloudprovider.InstanceStatus
 
 	st := &cloudprovider.InstanceStatus{}
 	switch nodeState.Status {
-	case "RECOVERING":
+	case "INIT", "CREATING", "RECOVERING":
 		st.State = cloudprovider.InstanceCreating
-	case "ACTIVE":
+	case "ACTIVE", "WARNING", "UPDATING", "OPERATING":
 		st.State = cloudprovider.InstanceRunning
 	case "DELETING":
 		st.State = cloudprovider.InstanceDeleting
