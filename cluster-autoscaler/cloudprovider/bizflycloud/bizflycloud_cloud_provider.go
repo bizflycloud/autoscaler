@@ -56,14 +56,14 @@ func newBizflyCloudProvider(manager *Manager, rl *cloudprovider.ResourceLimiter)
 }
 
 // Name returns name of the cloud provider.
-func (d *bizflycloudCloudProvider) Name() string {
+func (b *bizflycloudCloudProvider) Name() string {
 	return cloudprovider.BizflyCloudProviderName
 }
 
 // NodeGroups returns all node groups configured for this cloud provider.
-func (d *bizflycloudCloudProvider) NodeGroups() []cloudprovider.NodeGroup {
-	nodeGroups := make([]cloudprovider.NodeGroup, len(d.manager.nodeGroups))
-	for i, ng := range d.manager.nodeGroups {
+func (b *bizflycloudCloudProvider) NodeGroups() []cloudprovider.NodeGroup {
+	nodeGroups := make([]cloudprovider.NodeGroup, len(b.manager.nodeGroups))
+	for i, ng := range b.manager.nodeGroups {
 		nodeGroups[i] = ng
 	}
 	return nodeGroups
@@ -72,7 +72,7 @@ func (d *bizflycloudCloudProvider) NodeGroups() []cloudprovider.NodeGroup {
 // NodeGroupForNode returns the node group for the given node, nil if the node
 // should not be processed by cluster autoscaler, or non-nil error if such
 // occurred. Must be implemented.
-func (d *bizflycloudCloudProvider) NodeGroupForNode(node *apiv1.Node) (cloudprovider.NodeGroup, error) {
+func (b *bizflycloudCloudProvider) NodeGroupForNode(node *apiv1.Node) (cloudprovider.NodeGroup, error) {
 	providerID := node.Spec.ProviderID
 	nodeID := toNodeID(providerID)
 
@@ -81,7 +81,7 @@ func (d *bizflycloudCloudProvider) NodeGroupForNode(node *apiv1.Node) (cloudprov
 	// NOTE(arslan): the number of node groups per cluster is usually very
 	// small. So even though this looks like quadratic runtime, it's OK to
 	// proceed with this.
-	for _, group := range d.manager.nodeGroups {
+	for _, group := range b.manager.nodeGroups {
 		klog.V(5).Infof("iterating over node group %q", group.Id())
 		nodes, err := group.Nodes()
 		if err != nil {
@@ -100,19 +100,18 @@ func (d *bizflycloudCloudProvider) NodeGroupForNode(node *apiv1.Node) (cloudprov
 		}
 	}
 
-	// there is no "ErrNotExist" error, so we have to return a nil error
 	return nil, nil
 }
 
 // Pricing returns pricing model for this cloud provider or error if not
 // available. Implementation optional.
-func (d *bizflycloudCloudProvider) Pricing() (cloudprovider.PricingModel, errors.AutoscalerError) {
+func (b *bizflycloudCloudProvider) Pricing() (cloudprovider.PricingModel, errors.AutoscalerError) {
 	return nil, cloudprovider.ErrNotImplemented
 }
 
 // GetAvailableMachineTypes get all machine types that can be requested from
 // the cloud provider. Implementation optional.
-func (d *bizflycloudCloudProvider) GetAvailableMachineTypes() ([]string, error) {
+func (b *bizflycloudCloudProvider) GetAvailableMachineTypes() ([]string, error) {
 	return []string{}, nil
 }
 
@@ -120,7 +119,7 @@ func (d *bizflycloudCloudProvider) GetAvailableMachineTypes() ([]string, error) 
 // provided. The node group is not automatically created on the cloud provider
 // side. The node group is not returned by NodeGroups() until it is created.
 // Implementation optional.
-func (d *bizflycloudCloudProvider) NewNodeGroup(
+func (b *bizflycloudCloudProvider) NewNodeGroup(
 	machineType string,
 	labels map[string]string,
 	systemLabels map[string]string,
@@ -132,32 +131,32 @@ func (d *bizflycloudCloudProvider) NewNodeGroup(
 
 // GetResourceLimiter returns struct containing limits (max, min) for
 // resources (cores, memory etc.).
-func (d *bizflycloudCloudProvider) GetResourceLimiter() (*cloudprovider.ResourceLimiter, error) {
-	return d.resourceLimiter, nil
+func (b *bizflycloudCloudProvider) GetResourceLimiter() (*cloudprovider.ResourceLimiter, error) {
+	return b.resourceLimiter, nil
 }
 
 // GPULabel returns the label added to nodes with GPU resource.
-func (d *bizflycloudCloudProvider) GPULabel() string {
+func (b *bizflycloudCloudProvider) GPULabel() string {
 	return GPULabel
 }
 
 // GetAvailableGPUTypes return all available GPU types cloud provider supports.
-func (d *bizflycloudCloudProvider) GetAvailableGPUTypes() map[string]struct{} {
+func (b *bizflycloudCloudProvider) GetAvailableGPUTypes() map[string]struct{} {
 	return nil
 }
 
 // Cleanup cleans up open resources before the cloud provider is destroyed,
 // i.e. go routines etc.
-func (d *bizflycloudCloudProvider) Cleanup() error {
+func (b *bizflycloudCloudProvider) Cleanup() error {
 	return nil
 }
 
 // Refresh is called before every main loop and can be used to dynamically
 // update cloud provider state. In particular the list of node groups returned
 // by NodeGroups() can change as a result of CloudProvider.Refresh().
-func (d *bizflycloudCloudProvider) Refresh() error {
+func (b *bizflycloudCloudProvider) Refresh() error {
 	klog.V(4).Info("Refreshing node group cache")
-	return d.manager.Refresh()
+	return b.manager.Refresh()
 }
 
 // BuildBizflyCloud builds the Bizflycloud cloud provider.

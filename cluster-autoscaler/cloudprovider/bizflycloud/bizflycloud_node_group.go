@@ -250,16 +250,16 @@ func toInstanceStatus(nodeState gobizfly.PoolNode) *cloudprovider.InstanceStatus
 
 	st := &cloudprovider.InstanceStatus{}
 	switch nodeState.Status {
-	case "provisioning":
+	case "INIT", "CREATING", "RECOVERING":
 		st.State = cloudprovider.InstanceCreating
-	case "running":
+	case "ACTIVE", "WARNING", "UPDATING", "OPERATING":
 		st.State = cloudprovider.InstanceRunning
-	case "draining", "deleting":
+	case "DELETING":
 		st.State = cloudprovider.InstanceDeleting
 	default:
 		st.ErrorInfo = &cloudprovider.InstanceErrorInfo{
 			ErrorClass:   cloudprovider.OtherErrorClass,
-			ErrorCode:    "no-code-bizflycloud",
+			ErrorCode:    nodeState.Status,
 			ErrorMessage: nodeState.StatusReason,
 		}
 	}
