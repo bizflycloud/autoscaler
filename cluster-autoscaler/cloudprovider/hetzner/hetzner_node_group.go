@@ -305,7 +305,7 @@ func toInstanceStatus(status hcloud.ServerStatus) *cloudprovider.InstanceStatus 
 }
 
 func newNodeName(n *hetznerNodeGroup) string {
-	return fmt.Sprintf("%s-%d", n.id, rand.Int63())
+	return fmt.Sprintf("%s-%x", n.id, rand.Int63())
 }
 
 func buildNodeGroupLabels(n *hetznerNodeGroup) map[string]string {
@@ -410,7 +410,7 @@ func waitForServerAction(m *hetznerManager, serverName string, action *hcloud.Ac
 			return fmt.Errorf("error while waiting for server action: %s: %v", serverName, err)
 		}
 		return nil
-	case <-time.After(serverCreateTimeout):
+	case <-time.After(m.createTimeout):
 		return fmt.Errorf("timeout waiting for server %s", serverName)
 	}
 

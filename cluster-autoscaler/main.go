@@ -29,11 +29,14 @@ import (
 	"syscall"
 	"time"
 
+	"k8s.io/autoscaler/cluster-autoscaler/debuggingsnapshot"
+
 	"github.com/spf13/pflag"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apiserver/pkg/server/mux"
 	"k8s.io/apiserver/pkg/server/routes"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
 	cloudBuilder "k8s.io/autoscaler/cluster-autoscaler/cloudprovider/builder"
 	"k8s.io/autoscaler/cluster-autoscaler/config"
@@ -149,7 +152,7 @@ var (
 	estimatorFlag = flag.String("estimator", estimator.BinpackingEstimatorName,
 		"Type of resource estimator to be used in scale up. Available values: ["+strings.Join(estimator.AvailableEstimators, ",")+"]")
 
-	expanderFlag = flag.String("expander", "", "Type of node group expander to be used in scale up. Available values: ["+strings.Join(expander.AvailableExpanders, ",")+"]. Specifying multiple values separated by commas will call the expanders in succession until there is only one option remaining. Ties still existing after this process are broken randomly.")
+	expanderFlag = flag.String("expander", expander.RandomExpanderName, "Type of node group expander to be used in scale up. Available values: ["+strings.Join(expander.AvailableExpanders, ",")+"]. Specifying multiple values separated by commas will call the expanders in succession until there is only one option remaining. Ties still existing after this process are broken randomly.")
 
 	ignoreDaemonSetsUtilization = flag.Bool("ignore-daemonsets-utilization", false,
 		"Should CA ignore DaemonSet pods when calculating resource utilization for scaling down")
@@ -180,7 +183,8 @@ var (
 	daemonSetEvictionForOccupiedNodes  = flag.Bool("daemonset-eviction-for-occupied-nodes", true, "DaemonSet pods will be gracefully terminated from non-empty nodes")
 	userAgent                          = flag.String("user-agent", "cluster-autoscaler", "User agent used for HTTP calls.")
 
-	emitPerNodeGroupMetrics = flag.Bool("emit-per-nodegroup-metrics", false, "If true, emit per node group metrics.")
+	emitPerNodeGroupMetrics  = flag.Bool("emit-per-nodegroup-metrics", false, "If true, emit per node group metrics.")
+	debuggingSnapshotEnabled = flag.Bool("debugging-snapshot-enabled", false, "Whether the debugging snapshot of cluster autoscaler feature is enabled")
 )
 
 func createAutoscalingOptions() config.AutoscalingOptions {
@@ -303,17 +307,18 @@ func registerSignalHandlers(autoscaler core.Autoscaler) {
 	}()
 }
 
-func buildAutoscaler() (core.Autoscaler, error) {
+func buildAutoscaler(debuggingSnapshotter debuggingsnapshot.DebuggingSnapshotter) (core.Autoscaler, error) {
 	// Create basic config from flags.
 	autoscalingOptions := createAutoscalingOptions()
 	kubeClient := createKubeClient(getKubeConfig())
 	eventsKubeClient := createKubeClient(getKubeConfig())
 
 	opts := core.AutoscalerOptions{
-		AutoscalingOptions: autoscalingOptions,
-		ClusterSnapshot:    simulator.NewDeltaClusterSnapshot(),
-		KubeClient:         kubeClient,
-		EventsKubeClient:   eventsKubeClient,
+		AutoscalingOptions:   autoscalingOptions,
+		ClusterSnapshot:      simulator.NewDeltaClusterSnapshot(),
+		KubeClient:           kubeClient,
+		EventsKubeClient:     eventsKubeClient,
+		DebuggingSnapshotter: debuggingSnapshotter,
 	}
 
 	opts.Processors = ca_processors.DefaultProcessors()
@@ -344,10 +349,10 @@ func buildAutoscaler() (core.Autoscaler, error) {
 	return core.NewAutoscaler(opts)
 }
 
-func run(healthCheck *metrics.HealthCheck) {
+func run(healthCheck *metrics.HealthCheck, debuggingSnapshotter debuggingsnapshot.DebuggingSnapshotter) {
 	metrics.RegisterAll(*emitPerNodeGroupMetrics)
 
-	autoscaler, err := buildAutoscaler()
+	autoscaler, err := buildAutoscaler(debuggingSnapshotter)
 	if err != nil {
 		klog.Fatalf("Failed to create autoscaler: %v", err)
 	}
@@ -392,10 +397,14 @@ func main() {
 	leaderElection.LeaderElect = true
 
 	options.BindLeaderElectionFlags(&leaderElection, pflag.CommandLine)
+	utilfeature.DefaultMutableFeatureGate.AddFlag(pflag.CommandLine)
 	kube_flag.InitFlags()
+
 	healthCheck := metrics.NewHealthCheck(*maxInactivityTimeFlag, *maxFailingTimeFlag)
 
 	klog.V(1).Infof("Cluster Autoscaler %s", version.ClusterAutoscalerVersion)
+
+	debuggingSnapshotter := debuggingsnapshot.NewDebuggingSnapshotter(*debuggingSnapshotEnabled)
 
 	go func() {
 		pathRecorderMux := mux.NewPathRecorderMux("cluster-autoscaler")
@@ -403,6 +412,9 @@ func main() {
 		pathRecorderMux.HandleFunc("/metrics", func(w http.ResponseWriter, req *http.Request) {
 			defaultMetricsHandler(w, req)
 		})
+		if *debuggingSnapshotEnabled {
+			pathRecorderMux.HandleFunc("/snapshotz", debuggingSnapshotter.ResponseHandler)
+		}
 		pathRecorderMux.HandleFunc("/health-check", healthCheck.ServeHTTP)
 		if *enableProfiling {
 			routes.Profiling{}.Install(pathRecorderMux)
@@ -412,7 +424,7 @@ func main() {
 	}()
 
 	if !leaderElection.LeaderElect {
-		run(healthCheck)
+		run(healthCheck, debuggingSnapshotter)
 	} else {
 		id, err := os.Hostname()
 		if err != nil {
@@ -452,7 +464,7 @@ func main() {
 				OnStartedLeading: func(_ ctx.Context) {
 					// Since we are committing a suicide after losing
 					// mastership, we can safely ignore the argument.
-					run(healthCheck)
+					run(healthCheck, debuggingSnapshotter)
 				},
 				OnStoppedLeading: func() {
 					klog.Fatalf("lost master")

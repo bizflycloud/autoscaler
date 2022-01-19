@@ -111,6 +111,7 @@ type gceManagerImpl struct {
 
 	GceService      AutoscalingGceClient
 	migInfoProvider MigInfoProvider
+	migLister       MigLister
 
 	location              string
 	projectId             string
@@ -119,6 +120,7 @@ type gceManagerImpl struct {
 	regional              bool
 	explicitlyConfigured  map[GceRef]bool
 	migAutoDiscoverySpecs []migAutoDiscoveryConfig
+	reserved              *GceReserved
 }
 
 // CreateGceManager constructs GceManager object.
@@ -176,11 +178,13 @@ func CreateGceManager(configReader io.Reader, discoveryOpts cloudprovider.NodeGr
 	if err != nil {
 		return nil, err
 	}
-	cache := NewGceCache(gceService, concurrentGceRefreshes)
+	cache := NewGceCache()
+	migLister := NewMigLister(cache)
 	manager := &gceManagerImpl{
 		cache:                  cache,
 		GceService:             gceService,
-		migInfoProvider:        NewCachingMigInfoProvider(cache, gceService, projectId),
+		migLister:              migLister,
+		migInfoProvider:        NewCachingMigInfoProvider(cache, migLister, gceService, projectId, concurrentGceRefreshes),
 		location:               location,
 		regional:               regional,
 		projectId:              projectId,
@@ -188,6 +192,7 @@ func CreateGceManager(configReader io.Reader, discoveryOpts cloudprovider.NodeGr
 		interrupt:              make(chan struct{}),
 		explicitlyConfigured:   make(map[GceRef]bool),
 		concurrentGceRefreshes: concurrentGceRefreshes,
+		reserved:               &GceReserved{},
 	}
 
 	if err := manager.fetchExplicitMigs(discoveryOpts.NodeGroupSpecs); err != nil {
@@ -202,7 +207,7 @@ func CreateGceManager(configReader io.Reader, discoveryOpts cloudprovider.NodeGr
 	}
 
 	go wait.Until(func() {
-		if err := manager.cache.RegenerateInstancesCache(); err != nil {
+		if err := manager.migInfoProvider.RegenerateMigInstancesCache(); err != nil {
 			klog.Errorf("Error while regenerating Mig cache: %v", err)
 		}
 	}, time.Hour, manager.interrupt)
@@ -271,21 +276,22 @@ func (m *gceManagerImpl) DeleteInstances(instances []GceRef) error {
 
 // GetMigs returns list of registered MIGs.
 func (m *gceManagerImpl) GetMigs() []Mig {
-	return m.cache.GetMigs()
+	return m.migLister.GetMigs()
 }
 
 // GetMigForInstance returns MIG to which the given instance belongs.
 func (m *gceManagerImpl) GetMigForInstance(instance GceRef) (Mig, error) {
-	return m.cache.GetMigForInstance(instance)
+	return m.migInfoProvider.GetMigForInstance(instance)
 }
 
 // GetMigNodes returns mig nodes.
 func (m *gceManagerImpl) GetMigNodes(mig Mig) ([]cloudprovider.Instance, error) {
-	return m.GceService.FetchMigInstances(mig.GceRef())
+	return m.migInfoProvider.GetMigInstances(mig.GceRef())
 }
 
 // Refresh triggers refresh of cached resources.
 func (m *gceManagerImpl) Refresh() error {
+	m.cache.InvalidateAllMigInstances()
 	m.cache.InvalidateAllMigTargetSizes()
 	m.cache.InvalidateAllMigBasenames()
 	m.cache.InvalidateAllMigInstanceTemplateNames()
@@ -328,7 +334,7 @@ func (m *gceManagerImpl) forceRefresh() error {
 }
 
 func (m *gceManagerImpl) refreshAutoscalingOptions() {
-	for _, mig := range m.cache.GetMigs() {
+	for _, mig := range m.migLister.GetMigs() {
 		template, err := m.migInfoProvider.GetMigInstanceTemplate(mig.GceRef())
 		if err != nil {
 			klog.Warningf("Not evaluating autoscaling options for %q MIG: failed to find corresponding instance template", mig.GceRef(), err)
@@ -371,7 +377,7 @@ func (m *gceManagerImpl) fetchExplicitMigs(specs []string) error {
 	}
 
 	if changed {
-		return m.cache.RegenerateInstancesCache()
+		return m.migInfoProvider.RegenerateMigInstancesCache()
 	}
 	return nil
 }
@@ -461,7 +467,7 @@ func (m *gceManagerImpl) fetchAutoMigs() error {
 	}
 
 	if atomic.LoadInt32(&changed) > 0 {
-		return m.cache.RegenerateInstancesCache()
+		return m.migInfoProvider.RegenerateMigInstancesCache()
 	}
 
 	return nil
@@ -586,7 +592,7 @@ func (m *gceManagerImpl) GetMigTemplateNode(mig Mig) (*apiv1.Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	return m.templates.BuildNodeFromTemplate(mig, template, cpu, mem, nil)
+	return m.templates.BuildNodeFromTemplate(mig, template, cpu, mem, nil, m.reserved)
 }
 
 func (m *gceManagerImpl) getCpuAndMemoryForMachineType(machineType string, zone string) (cpu int64, mem int64, err error) {

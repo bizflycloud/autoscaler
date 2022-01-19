@@ -19,8 +19,8 @@ package vpa
 import (
 	"encoding/json"
 	"fmt"
+	v1 "k8s.io/api/admission/v1"
 
-	"k8s.io/api/admission/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/autoscaler/vertical-pod-autoscaler/pkg/admission-controller/resource"
 	vpa_types "k8s.io/autoscaler/vertical-pod-autoscaler/pkg/apis/autoscaling.k8s.io/v1"
@@ -68,8 +68,8 @@ func (h *resourceHandler) DisallowIncorrectObjects() bool {
 }
 
 // GetPatches builds patches for VPA in given admission request.
-func (h *resourceHandler) GetPatches(ar *v1beta1.AdmissionRequest) ([]resource.PatchRecord, error) {
-	raw, isCreate := ar.Object.Raw, ar.Operation == v1beta1.Create
+func (h *resourceHandler) GetPatches(ar *v1.AdmissionRequest) ([]resource.PatchRecord, error) {
+	raw, isCreate := ar.Object.Raw, ar.Operation == v1.Create
 	vpa, err := parseVPA(raw)
 	if err != nil {
 		return nil, err
@@ -114,6 +114,10 @@ func validateVPA(vpa *vpa_types.VerticalPodAutoscaler, isCreate bool) error {
 		}
 		if _, found := possibleUpdateModes[*mode]; !found {
 			return fmt.Errorf("unexpected UpdateMode value %s", *mode)
+		}
+
+		if minReplicas := vpa.Spec.UpdatePolicy.MinReplicas; minReplicas != nil && *minReplicas <= 0 {
+			return fmt.Errorf("MinReplicas has to be positive, got %v", *minReplicas)
 		}
 	}
 

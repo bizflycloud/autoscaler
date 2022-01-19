@@ -19,27 +19,25 @@ package azure
 import (
 	"fmt"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2019-12-01/compute"
-	"github.com/Azure/azure-sdk-for-go/services/storage/mgmt/2019-06-01/storage"
+	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2020-12-01/compute"
+	"github.com/Azure/azure-sdk-for-go/services/storage/mgmt/2021-02-01/storage"
 	"github.com/Azure/go-autorest/autorest/to"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 
-	"k8s.io/legacy-cloud-providers/azure/clients/diskclient/mockdiskclient"
-	"k8s.io/legacy-cloud-providers/azure/clients/interfaceclient/mockinterfaceclient"
-	"k8s.io/legacy-cloud-providers/azure/clients/storageaccountclient/mockstorageaccountclient"
-	"k8s.io/legacy-cloud-providers/azure/clients/vmclient/mockvmclient"
-	"k8s.io/legacy-cloud-providers/azure/retry"
+	"sigs.k8s.io/cloud-provider-azure/pkg/azureclients/storageaccountclient/mockstorageaccountclient"
+	"sigs.k8s.io/cloud-provider-azure/pkg/retry"
 )
 
 const (
-	testAccountName            = "account"
-	storageAccountClientErrMsg = "Server failed to authenticate the request. Make sure the value of Authorization " +
-		"header is formed correctly including the signature"
+	testAccountName = "account"
+	// TODO(nilo19): verify if DeleteBlob unit test needs to check error string, and which message is expected. We saw both:
+	// storageAccountClientErrMsg = "Server failed to authenticate the request. Make sure the value of Authorization " +
+	//	 "header is formed correctly including the signature"
+	// storageAccountClientErrMsg = "The specified account is disabled"
 )
 
 func GetTestAzureUtil(t *testing.T) *AzUtil {
@@ -322,112 +320,7 @@ func TestDeleteBlob(t *testing.T) {
 	azUtil.manager.azClient.storageAccountsClient = mockSAClient
 
 	err := azUtil.DeleteBlob(testAccountName, "vhd", "blob")
-	assert.True(t, strings.Contains(err.Error(), storageAccountClientErrMsg))
-}
-
-func TestDeleteVirtualMachine(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	azUtil := GetTestAzureUtil(t)
-	mockVMClient := mockvmclient.NewMockInterface(ctrl)
-	azUtil.manager.azClient.virtualMachinesClient = mockVMClient
-
-	mockVMClient.EXPECT().Get(
-		gomock.Any(),
-		azUtil.manager.config.ResourceGroup,
-		"vm",
-		gomock.Any()).Return(compute.VirtualMachine{}, errInternal)
-
-	err := azUtil.DeleteVirtualMachine("rg", "vm")
-	assert.NoError(t, err)
-
-	mockVMClient.EXPECT().Get(
-		gomock.Any(),
-		azUtil.manager.config.ResourceGroup,
-		"vm",
-		gomock.Any()).Return(compute.VirtualMachine{
-		VirtualMachineProperties: &compute.VirtualMachineProperties{
-			StorageProfile: &compute.StorageProfile{
-				OsDisk: &compute.OSDisk{},
-			},
-		},
-	}, nil)
-	err = azUtil.DeleteVirtualMachine("rg", "vm")
-	expectedErr := fmt.Errorf("os disk does not have a VHD URI")
-	assert.Equal(t, expectedErr, err)
-
-	mockVMClient.EXPECT().Get(
-		gomock.Any(),
-		azUtil.manager.config.ResourceGroup,
-		"vm",
-		gomock.Any()).Return(compute.VirtualMachine{
-		VirtualMachineProperties: &compute.VirtualMachineProperties{
-			StorageProfile: &compute.StorageProfile{
-				OsDisk: &compute.OSDisk{
-					Vhd: &compute.VirtualHardDisk{
-						URI: to.StringPtr("https://vhdstorage8h8pjybi9hbsl6.blob.core.windows.net" +
-							"/vhds/osdisks/disk1234.vhd"),
-					},
-				},
-			},
-			NetworkProfile: &compute.NetworkProfile{
-				NetworkInterfaces: &[]compute.NetworkInterfaceReference{
-					{ID: to.StringPtr("foo/bar")},
-				},
-			},
-		},
-	}, nil)
-	mockVMClient.EXPECT().Delete(
-		gomock.Any(),
-		azUtil.manager.config.ResourceGroup,
-		"vm").Return(nil).Times(2)
-	mockSAClient := mockstorageaccountclient.NewMockInterface(ctrl)
-	mockSAClient.EXPECT().ListKeys(
-		gomock.Any(),
-		azUtil.manager.config.ResourceGroup,
-		"vhdstorage8h8pjybi9hbsl6").Return(storage.AccountListKeysResult{
-		Keys: &[]storage.AccountKey{
-			{Value: to.StringPtr("dmFsdWUK")},
-		},
-	}, nil)
-	azUtil.manager.azClient.storageAccountsClient = mockSAClient
-	mockNICClient := mockinterfaceclient.NewMockInterface(ctrl)
-	mockNICClient.EXPECT().Delete(
-		gomock.Any(),
-		azUtil.manager.config.ResourceGroup,
-		"bar").Return(nil).Times(2)
-	azUtil.manager.azClient.interfacesClient = mockNICClient
-	err = azUtil.DeleteVirtualMachine("rg", "vm")
-	assert.True(t, strings.Contains(err.Error(), "no such host"))
-
-	mockVMClient.EXPECT().Get(
-		gomock.Any(),
-		azUtil.manager.config.ResourceGroup,
-		"vm",
-		gomock.Any()).Return(compute.VirtualMachine{
-		VirtualMachineProperties: &compute.VirtualMachineProperties{
-			StorageProfile: &compute.StorageProfile{
-				OsDisk: &compute.OSDisk{
-					Name:        to.StringPtr("disk"),
-					ManagedDisk: &compute.ManagedDiskParameters{},
-				},
-			},
-			NetworkProfile: &compute.NetworkProfile{
-				NetworkInterfaces: &[]compute.NetworkInterfaceReference{
-					{ID: to.StringPtr("foo/bar")},
-				},
-			},
-		},
-	}, nil)
-	mockDiskClient := mockdiskclient.NewMockInterface(ctrl)
-	mockDiskClient.EXPECT().Delete(
-		gomock.Any(),
-		azUtil.manager.config.ResourceGroup,
-		"disk").Return(nil)
-	azUtil.manager.azClient.disksClient = mockDiskClient
-	err = azUtil.DeleteVirtualMachine("rg", "vm")
-	assert.NoError(t, err)
+	assert.Error(t, err)
 }
 
 func TestNormalizeMasterResourcesForScaling(t *testing.T) {

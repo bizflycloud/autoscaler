@@ -33,6 +33,7 @@ this document:
   * [How can I prevent Cluster Autoscaler from scaling down a particular node?](#how-can-i-prevent-cluster-autoscaler-from-scaling-down-a-particular-node)
   * [How can I configure overprovisioning with Cluster Autoscaler?](#how-can-i-configure-overprovisioning-with-cluster-autoscaler)
   * [How can I enable/disable eviction for a specific DaemonSet](#how-can-i-enabledisable-eviction-for-a-specific-daemonset)
+  * [How can I enable Cluster Autoscaler to scale up when Node's max volume count is exceeded (CSI migration enabled)?](#how-can-i-enable-cluster-autoscaler-to-scale-up-when-nodes-max-volume-count-is-exceeded-csi-migration-enabled)
 * [Internals](#internals)
   * [Are all of the mentioned heuristics and timings final?](#are-all-of-the-mentioned-heuristics-and-timings-final)
   * [How does scale-up work?](#how-does-scale-up-work)
@@ -53,8 +54,10 @@ this document:
   * [CA doesn’t work, but it used to work yesterday. Why?](#ca-doesnt-work-but-it-used-to-work-yesterday-why)
   * [How can I check what is going on in CA ?](#how-can-i-check-what-is-going-on-in-ca-)
   * [What events are emitted by CA?](#what-events-are-emitted-by-ca)
+  * [My cluster is below minimum / above maximum number of nodes, but CA did not fix that! Why?](#my-cluster-is-below-minimum--above-maximum-number-of-nodes-but-ca-did-not-fix-that-why)
   * [What happens in scale-up when I have no more quota in the cloud provider?](#what-happens-in-scale-up-when-i-have-no-more-quota-in-the-cloud-provider)
 * [Developer](#developer)
+  * [What go version should be used to compile CA?](#what-go-version-should-be-used-to-compile-ca)
   * [How can I run e2e tests?](#how-can-i-run-e2e-tests)
   * [How should I test my code before submitting PR?](#how-should-i-test-my-code-before-submitting-pr)
   * [How can I update CA dependencies (particularly k8s.io/kubernetes)?](#how-can-i-update-ca-dependencies-particularly-k8siokubernetes)
@@ -459,6 +462,17 @@ sufficient to modify the pod spec in the DaemonSet object.
 
 This annotation has no effect on pods that are not a part of any DaemonSet.
 
+### How can I enable Cluster Autoscaler to scale up when Node's max volume count is exceeded (CSI migration enabled)?
+
+Kubernetes scheduler will fail to schedule a Pod to a Node if the Node's max volume count is exceeded. In such case to enable Cluster Autoscaler to scale up in a Kubernetes cluster with [CSI migration](https://github.com/kubernetes/enhancements/blob/master/keps/sig-storage/625-csi-migration/README.md) enabled, the appropriate CSI related feature gates have to be specified for the Cluster Autoscaler (if the corresponding feature gates are not enabled by default).
+
+For example:
+```
+--feature-gates=CSIMigration=true,CSIMigration{Provdider}=true,InTreePlugin{Provider}Unregister=true
+```
+
+For a complete list of the feature gates and their default values per Kubernetes versions, refer to the [Feature Gates documentation](https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/).
+
 ****************
 
 # Internals
@@ -657,7 +671,7 @@ after scale-up. This is useful when you have different classes of nodes, for exa
 
 * `price` - select the node group that will cost the least and, at the same time, whose machines
 would match the cluster size. This expander is described in more details
-[HERE](https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/proposals/pricing.md). Currently it works only for GCE, GKE and Packet (patches welcome.)
+[HERE](https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/proposals/pricing.md). Currently it works only for GCE, GKE and Equinix Metal (patches welcome.)
 
 * `priority` - selects the node group that has the highest priority assigned by the user. It's configuration is described in more details [here](expander/priority/readme.md)
 
@@ -735,6 +749,7 @@ The following startup parameters are supported for cluster autoscaler:
 | `min-replica-count` | Minimum number or replicas that a replica set or replication controller should have to allow their pods deletion in scale down | 0
 | `daemonset-eviction-for-empty-nodes` | Whether DaemonSet pods will be gracefully terminated from empty nodes | false
 | `daemonset-eviction-for-occupied-nodes` | Whether DaemonSet pods will be gracefully terminated from non-empty nodes | true
+| `feature-gates` | A set of key=value pairs that describe feature gates for alpha/experimental features. | ""
 
 # Troubleshooting:
 
@@ -757,6 +772,8 @@ CA doesn't remove underutilized nodes if they are running pods [that it shouldn'
   will wait for extra 5 minutes before considering it for removal again,
 
 * using large custom value for `--scale-down-delay-after-delete` or `--scan-interval`, which delays CA action.
+
+* make sure `--scale-down-enabled` parameter in command is not set to false
 
 ### How to set PDBs to enable CA to move kube-system pods?
 
@@ -903,6 +920,21 @@ From version 0.6.2, Cluster Autoscaler backs off from scaling up a node group af
 Depending on how long scale-ups have been failing, it may wait up to 30 minutes before next attempt.
 
 # Developer:
+
+### What go version should be used to compile CA?
+
+Cluster Autoscaler generally tries to use the same go version that is used by embedded Kubernetes code.
+For example CA 1.21 will use the same go version as Kubernetes 1.21. Only the officially used go
+version is supported and CA may not compile using other versions.
+
+The source of truth for the used go version is builder/Dockerfile.
+
+Warning: do NOT rely on go version specified in go.mod file. It is only meant to control go mod
+behavior and is not indicative of the go version actually used by CA. In particular go 1.17 changes go mod
+behavior in a way that is incompatible with existing Kubernetes tooling.
+Following [Kubernetes example](https://github.com/kubernetes/kubernetes/pull/105563#issuecomment-960915506)
+we have decided to pin version specified in go.mod to 1.16 for now (even though both Kubernetes
+and CA no longer compile using go 1.16).
 
 ### How can I run e2e tests?
 

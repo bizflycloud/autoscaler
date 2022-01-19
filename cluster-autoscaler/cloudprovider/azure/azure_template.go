@@ -18,7 +18,7 @@ package azure
 
 import (
 	"fmt"
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2019-12-01/compute"
+	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2020-12-01/compute"
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,6 +32,8 @@ import (
 	"strings"
 	"time"
 )
+
+const azureDiskTopologyKey string = "topology.disk.csi.azure.com/zone"
 
 func buildInstanceOS(template compute.VirtualMachineScaleSet) string {
 	instanceOS := cloudprovider.DefaultOS
@@ -58,8 +60,10 @@ func buildGenericLabels(template compute.VirtualMachineScaleSet, nodeName string
 		}
 
 		result[apiv1.LabelTopologyZone] = strings.Join(failureDomains[:], cloudvolume.LabelMultiZoneDelimiter)
+		result[azureDiskTopologyKey] = strings.Join(failureDomains[:], cloudvolume.LabelMultiZoneDelimiter)
 	} else {
 		result[apiv1.LabelTopologyZone] = "0"
+		result[azureDiskTopologyKey] = ""
 	}
 
 	result[apiv1.LabelHostname] = nodeName

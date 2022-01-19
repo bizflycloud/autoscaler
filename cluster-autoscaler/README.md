@@ -21,7 +21,7 @@ You should also take a look at the notes and "gotchas" for your specific cloud p
 * [CloudStack](./cloudprovider/cloudstack/README.md)
 * [HuaweiCloud](./cloudprovider/huaweicloud/README.md)
 * [Hetzner](./cloudprovider/hetzner/README.md)
-* [Packet](./cloudprovider/packet/README.md#notes) 
+* [Equinix Metal](./cloudprovider/packet/README.md#notes) 
 * [IonosCloud](./cloudprovider/ionoscloud/README.md)
 * [OVHcloud](./cloudprovider/ovhcloud/README.md)
 * [Linode](./cloudprovider/linode/README.md)
@@ -36,6 +36,12 @@ Starting from Kubernetes 1.12, versioning scheme was changed to match Kubernetes
 
 | Kubernetes Version  | CA Version   |
 |--------|--------|
+| 1.22.X | 1.22.X  |
+| 1.21.X | 1.21.X  |
+| 1.20.X | 1.20.X  |
+| 1.19.X | 1.19.X  |
+| 1.18.X | 1.18.X  |
+| 1.17.X | 1.17.X  |
 | 1.16.X | 1.16.X  |
 | 1.15.X | 1.15.X  |
 | 1.14.X | 1.14.X  |
@@ -156,7 +162,7 @@ Supported cloud providers:
 * DigitalOcean https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/cloudprovider/digitalocean/README.md
 * CloudStack https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/cloudprovider/cloudstack/README.md
 * Exoscale https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/cloudprovider/exoscale/README.md
-* Packet https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/cloudprovider/packet/README.md
+* Equinix Metal https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/cloudprovider/packet/README.md
 * OVHcloud https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/cloudprovider/ovhcloud/README.md
 * Linode https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/cloudprovider/linode/README.md
 * Hetzner https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/cloudprovider/hetzner/README.md
