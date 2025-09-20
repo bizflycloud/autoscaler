@@ -18,13 +18,16 @@ package clusterapi
 
 import (
 	"fmt"
-	"os"
+	"github.com/google/go-cmp/cmp"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/autoscaler/cluster-autoscaler/utils/units"
 )
 
 const (
@@ -114,24 +117,6 @@ func TestUtilParseScalingBounds(t *testing.T) {
 		},
 		min: 0,
 		max: 1,
-	}, {
-		description: "deprecated min/max annotations still work, result is min 0, max 1",
-		annotations: map[string]string{
-			deprecatedNodeGroupMinSizeAnnotationKey: "0",
-			deprecatedNodeGroupMaxSizeAnnotationKey: "1",
-		},
-		min: 0,
-		max: 1,
-	}, {
-		description: "deprecated min/max annotations do not take precedence over non-deprecated annotations, result is min 1, max 2",
-		annotations: map[string]string{
-			deprecatedNodeGroupMinSizeAnnotationKey: "0",
-			deprecatedNodeGroupMaxSizeAnnotationKey: "1",
-			nodeGroupMinSizeAnnotationKey:           "1",
-			nodeGroupMaxSizeAnnotationKey:           "2",
-		},
-		min: 1,
-		max: 2,
 	}} {
 		t.Run(tc.description, func(t *testing.T) {
 			machineSet := unstructured.Unstructured{
@@ -437,11 +422,201 @@ func TestUtilNormalizedProviderID(t *testing.T) {
 		description: "id with / characters",
 		providerID:  "aws:////i-12345678",
 		expectedID:  "i-12345678",
+	}, {
+		description: "azure standard vm",
+		providerID:  "azure:///subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/resourceGroupName/providers/Microsoft.Compute/virtualMachines/control-plane-1cbe5-d4dx7",
+		expectedID:  "control-plane-1cbe5-d4dx7",
+	}, {
+		description: "azure vmss",
+		providerID:  "azure:///subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/resourceGroupName/providers/Microsoft.Compute/virtualMachineScaleSets/vmssName/virtualMachines/0",
+		expectedID:  "azure:///subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/resourceGroupName/providers/Microsoft.Compute/virtualMachineScaleSets/vmssName/virtualMachines/0",
 	}} {
 		t.Run(tc.description, func(t *testing.T) {
 			actualID := normalizedProviderString(tc.providerID)
 			if actualID != tc.expectedID {
 				t.Errorf("expected %v, got %v", tc.expectedID, actualID)
+			}
+		})
+	}
+}
+
+func TestParseCPUCapacity(t *testing.T) {
+	for _, tc := range []struct {
+		description      string
+		annotations      map[string]string
+		expectedQuantity resource.Quantity
+		expectedError    bool
+	}{{
+		description:      "nil annotations",
+		expectedQuantity: zeroQuantity.DeepCopy(),
+		expectedError:    false,
+	}, {
+		description:      "empty annotations",
+		annotations:      map[string]string{},
+		expectedQuantity: zeroQuantity.DeepCopy(),
+		expectedError:    false,
+	}, {
+		description:      "bad quantity",
+		annotations:      map[string]string{cpuKey: "not-a-quantity"},
+		expectedQuantity: zeroQuantity.DeepCopy(),
+		expectedError:    true,
+	}, {
+		description:      "valid quantity with units",
+		annotations:      map[string]string{cpuKey: "123m"},
+		expectedError:    false,
+		expectedQuantity: resource.MustParse("123m"),
+	}, {
+		description:      "valid quantity without units",
+		annotations:      map[string]string{cpuKey: "1"},
+		expectedError:    false,
+		expectedQuantity: resource.MustParse("1"),
+	}, {
+		description:      "valid fractional quantity without units",
+		annotations:      map[string]string{cpuKey: "0.1"},
+		expectedError:    false,
+		expectedQuantity: resource.MustParse("0.1"),
+	}} {
+		t.Run(tc.description, func(t *testing.T) {
+			got, err := parseCPUCapacity(tc.annotations)
+			if tc.expectedError && err == nil {
+				t.Fatal("expected an error")
+			}
+			if tc.expectedQuantity.Cmp(got) != 0 {
+				t.Errorf("expected %v, got %v", tc.expectedQuantity.String(), got.String())
+			}
+		})
+	}
+}
+
+func TestParseMemoryCapacity(t *testing.T) {
+	for _, tc := range []struct {
+		description      string
+		annotations      map[string]string
+		expectedQuantity resource.Quantity
+		expectedError    bool
+	}{{
+		description:      "nil annotations",
+		expectedQuantity: zeroQuantity.DeepCopy(),
+		expectedError:    false,
+	}, {
+		description:      "empty annotations",
+		annotations:      map[string]string{},
+		expectedQuantity: zeroQuantity.DeepCopy(),
+		expectedError:    false,
+	}, {
+		description:      "bad quantity",
+		annotations:      map[string]string{memoryKey: "not-a-quantity"},
+		expectedQuantity: zeroQuantity.DeepCopy(),
+		expectedError:    true,
+	}, {
+		description:      "quantity as with no unit type",
+		annotations:      map[string]string{memoryKey: "1024"},
+		expectedQuantity: *resource.NewQuantity(1024, resource.DecimalSI),
+		expectedError:    false,
+	}, {
+		description:      "quantity with unit type (Mi)",
+		annotations:      map[string]string{memoryKey: "456Mi"},
+		expectedError:    false,
+		expectedQuantity: *resource.NewQuantity(456*units.MiB, resource.DecimalSI),
+	}, {
+		description:      "quantity with unit type (Gi)",
+		annotations:      map[string]string{memoryKey: "8Gi"},
+		expectedError:    false,
+		expectedQuantity: *resource.NewQuantity(8*units.GiB, resource.DecimalSI),
+	}} {
+		t.Run(tc.description, func(t *testing.T) {
+			got, err := parseMemoryCapacity(tc.annotations)
+			if tc.expectedError && err == nil {
+				t.Fatal("expected an error")
+			}
+			if tc.expectedQuantity.Cmp(got) != 0 {
+				t.Errorf("expected %v, got %v", tc.expectedQuantity.String(), got.String())
+			}
+		})
+	}
+}
+
+func TestParseGPUCapacity(t *testing.T) {
+	for _, tc := range []struct {
+		description      string
+		annotations      map[string]string
+		expectedQuantity resource.Quantity
+		expectedError    bool
+	}{{
+		description:      "nil annotations",
+		expectedQuantity: zeroQuantity.DeepCopy(),
+		expectedError:    false,
+	}, {
+		description:      "empty annotations",
+		annotations:      map[string]string{},
+		expectedQuantity: zeroQuantity.DeepCopy(),
+		expectedError:    false,
+	}, {
+		description:      "bad quantity",
+		annotations:      map[string]string{gpuCountKey: "not-a-quantity"},
+		expectedQuantity: zeroQuantity.DeepCopy(),
+		expectedError:    true,
+	}, {
+		description:      "valid quantity",
+		annotations:      map[string]string{gpuCountKey: "13"},
+		expectedError:    false,
+		expectedQuantity: resource.MustParse("13"),
+	}, {
+		description:      "valid quantity, bad unit type",
+		annotations:      map[string]string{gpuCountKey: "13Mi"},
+		expectedQuantity: zeroQuantity.DeepCopy(),
+		expectedError:    true,
+	}} {
+		t.Run(tc.description, func(t *testing.T) {
+			got, err := parseGPUCount(tc.annotations)
+			if tc.expectedError && err == nil {
+				t.Fatal("expected an error")
+			}
+			if tc.expectedQuantity.Cmp(got) != 0 {
+				t.Errorf("expected %v, got %v", tc.expectedQuantity.String(), got.String())
+			}
+		})
+	}
+}
+
+func TestParseMaxPodsCapacity(t *testing.T) {
+	for _, tc := range []struct {
+		description      string
+		annotations      map[string]string
+		expectedQuantity resource.Quantity
+		expectedError    bool
+	}{{
+		description:      "nil annotations",
+		expectedQuantity: zeroQuantity.DeepCopy(),
+		expectedError:    false,
+	}, {
+		description:      "empty annotations",
+		annotations:      map[string]string{},
+		expectedQuantity: zeroQuantity.DeepCopy(),
+		expectedError:    false,
+	}, {
+		description:      "bad quantity",
+		annotations:      map[string]string{maxPodsKey: "not-a-quantity"},
+		expectedQuantity: zeroQuantity.DeepCopy(),
+		expectedError:    true,
+	}, {
+		description:      "valid quantity",
+		annotations:      map[string]string{maxPodsKey: "13"},
+		expectedError:    false,
+		expectedQuantity: resource.MustParse("13"),
+	}, {
+		description:      "valid quantity, bad unit type",
+		annotations:      map[string]string{maxPodsKey: "13Mi"},
+		expectedQuantity: zeroQuantity.DeepCopy(),
+		expectedError:    true,
+	}} {
+		t.Run(tc.description, func(t *testing.T) {
+			got, err := parseMaxPodsCapacity(tc.annotations)
+			if tc.expectedError && err == nil {
+				t.Fatal("expected an error")
+			}
+			if tc.expectedQuantity.Cmp(got) != 0 {
+				t.Errorf("expected %v, got %v", tc.expectedQuantity.String(), got.String())
 			}
 		})
 	}
@@ -486,94 +661,6 @@ func Test_clusterNameFromResource(t *testing.T) {
 			},
 		},
 		want: "",
-	}, {
-		name: "cluster name set in MachineSet labels, v1alpha1 MachineSet",
-		resource: &unstructured.Unstructured{
-			Object: map[string]interface{}{
-				"kind":       machineSetKind,
-				"apiVersion": "cluster.k8s.io/v1alpha1",
-				"metadata": map[string]interface{}{
-					"name":      "foo",
-					"namespace": "default",
-					"labels": map[string]interface{}{
-						deprecatedClusterNameLabel: "bar",
-					},
-				},
-				"spec": map[string]interface{}{
-					"replicas": int64(1),
-				},
-				"status": map[string]interface{}{},
-			},
-		},
-		want: "bar",
-	}, {
-		name: "cluster name set in MachineDeployment, v1alpha1 MachineDeployment",
-		resource: &unstructured.Unstructured{
-			Object: map[string]interface{}{
-				"kind":       machineDeploymentKind,
-				"apiVersion": "cluster.k8s.io/v1alpha1",
-				"metadata": map[string]interface{}{
-					"name":      "foo",
-					"namespace": "default",
-					"labels": map[string]interface{}{
-						deprecatedClusterNameLabel: "bar",
-					},
-				},
-				"spec": map[string]interface{}{
-					"replicas": int64(1),
-				},
-				"status": map[string]interface{}{},
-			},
-		},
-		want: "bar",
-	}, {
-		name: "cluster name set in Machine template labels, v1alpha1 MachineSet",
-		resource: &unstructured.Unstructured{
-			Object: map[string]interface{}{
-				"kind":       machineSetKind,
-				"apiVersion": "cluster.k8s.io/v1alpha1",
-				"metadata": map[string]interface{}{
-					"name":      "foo",
-					"namespace": "default",
-				},
-				"spec": map[string]interface{}{
-					"replicas": int64(1),
-					"template": map[string]interface{}{
-						"metadata": map[string]interface{}{
-							"labels": map[string]interface{}{
-								deprecatedClusterNameLabel: "bar",
-							},
-						},
-					},
-				},
-				"status": map[string]interface{}{},
-			},
-		},
-		want: "bar",
-	}, {
-		name: "cluster name set in Machine template, v1alpha1 MachineDeployment",
-		resource: &unstructured.Unstructured{
-			Object: map[string]interface{}{
-				"kind":       machineDeploymentKind,
-				"apiVersion": "cluster.k8s.io/v1alpha1",
-				"metadata": map[string]interface{}{
-					"name":      "foo",
-					"namespace": "default",
-				},
-				"spec": map[string]interface{}{
-					"replicas": int64(1),
-					"template": map[string]interface{}{
-						"metadata": map[string]interface{}{
-							"labels": map[string]interface{}{
-								deprecatedClusterNameLabel: "bar",
-							},
-						},
-					},
-				},
-				"status": map[string]interface{}{},
-			},
-		},
-		want: "bar",
 	}, {
 		name: "cluster name not set, v1alpha2 MachineSet",
 		resource: &unstructured.Unstructured{
@@ -735,9 +822,7 @@ func Test_getKeyHelpers(t *testing.T) {
 	}
 
 	testgroup := "test.k8s.io"
-	if err := os.Setenv(CAPIGroupEnvVar, testgroup); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	t.Setenv(CAPIGroupEnvVar, testgroup)
 
 	for _, tc := range []struct {
 		name     string
@@ -774,6 +859,80 @@ func Test_getKeyHelpers(t *testing.T) {
 			observed := tc.testfunc()
 			if observed != tc.expected {
 				t.Errorf("%s, mismatch, expected=%s, observed=%s", tc.name, observed, tc.expected)
+			}
+		})
+	}
+}
+
+func TestSystemArchitectureFromString(t *testing.T) {
+	tcs := []struct {
+		name     string
+		archName string
+		wantArch SystemArchitecture
+	}{
+		{
+			name:     "valid architecture is converted",
+			archName: "amd64",
+			wantArch: Amd64,
+		},
+		{
+			name:     "invalid architecture results in UnknownArchitecture",
+			archName: "some-arch",
+			wantArch: UnknownArch,
+		},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			gotArch := SystemArchitectureFromString(tc.archName)
+			if diff := cmp.Diff(tc.wantArch, gotArch); diff != "" {
+				t.Errorf("ToSystemArchitecture diff (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestGetSystemArchitectureFromEnvOrDefault(t *testing.T) {
+	amd64 := Amd64.Name()
+	arm64 := Arm64.Name()
+	wrongValue := "wrong"
+
+	tcs := []struct {
+		name     string
+		envValue *string
+		want     SystemArchitecture
+	}{
+		{
+			name:     fmt.Sprintf("%s is set to arm64", scaleUpFromZeroDefaultArchEnvVar),
+			envValue: &arm64,
+			want:     Arm64,
+		},
+		{
+			name:     fmt.Sprintf("%s is set to amd64", scaleUpFromZeroDefaultArchEnvVar),
+			envValue: &amd64,
+			want:     Amd64,
+		},
+		{
+			name:     fmt.Sprintf("%s is not set", scaleUpFromZeroDefaultArchEnvVar),
+			envValue: nil,
+			want:     DefaultArch,
+		},
+		{
+			name:     fmt.Sprintf("%s is set to a wrong value", scaleUpFromZeroDefaultArchEnvVar),
+			envValue: &wrongValue,
+			want:     DefaultArch,
+		},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			// Reset the systemArchitecture variable to nil before each test due to the lazy initialization of the variable.
+			systemArchitecture = nil
+			// Reset the once variable to its initial state before each test.
+			once = sync.Once{}
+			if tc.envValue != nil {
+				t.Setenv(scaleUpFromZeroDefaultArchEnvVar, *tc.envValue)
+			}
+			if got := GetDefaultScaleFromZeroArchitecture(); got != tc.want {
+				t.Errorf("GetDefaultScaleFromZeroArchitecture() = %v, want %v", got, tc.want)
 			}
 		})
 	}

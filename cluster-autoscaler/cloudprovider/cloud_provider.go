@@ -23,8 +23,8 @@ import (
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/autoscaler/cluster-autoscaler/config"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
 	"k8s.io/autoscaler/cluster-autoscaler/utils/errors"
-	schedulerframework "k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
 const (
@@ -40,8 +40,12 @@ const (
 	BizflyCloudProviderName = "bizflycloud"
 	// BrightboxProviderName gets the provider name of brightbox
 	BrightboxProviderName = "brightbox"
+	// CherryServersProviderName gets the provider name of cherry servers
+	CherryServersProviderName = "cherryservers"
 	// CloudStackProviderName gets the provider name of cloudstack
 	CloudStackProviderName = "cloudstack"
+	// CoreWeaveProviderName gets the provider name of coreweave
+	CoreWeaveProviderName = "coreweave"
 	// ClusterAPIProviderName gets the provider name of clusterapi
 	ClusterAPIProviderName = "clusterapi"
 	// DigitalOceanProviderName gets the provider name of digitalocean
@@ -54,19 +58,50 @@ const (
 	HetznerProviderName = "hetzner"
 	// MagnumProviderName gets the provider name of magnum
 	MagnumProviderName = "magnum"
+	// KamateraProviderName gets the provider name of kamatera
+	KamateraProviderName = "kamatera"
 	// KubemarkProviderName gets the provider name of kubemark
 	KubemarkProviderName = "kubemark"
+	// KwokProviderName gets the provider name of kwok
+	KwokProviderName = "kwok"
 	// HuaweicloudProviderName gets the provider name of huaweicloud
 	HuaweicloudProviderName = "huaweicloud"
 	// IonoscloudProviderName gets the provider name of ionoscloud
 	IonoscloudProviderName = "ionoscloud"
+	// OracleCloudProviderName gets the provider name of oci
+	OracleCloudProviderName = "oci"
 	// OVHcloudProviderName gets the provider name of ovhcloud
 	OVHcloudProviderName = "ovhcloud"
 	// LinodeProviderName gets the provider name of linode
 	LinodeProviderName = "linode"
+	// ScalewayProviderName gets the provider name of scaleway
+	ScalewayProviderName = "scaleway"
+	// VolcengineProviderName gets the provider name of volcengine
+	VolcengineProviderName = "volcengine"
+	// VultrProviderName gets the provider name of vultr
+	VultrProviderName = "vultr"
 	// PacketProviderName gets the provider name of packet
 	PacketProviderName = "packet"
+	// EquinixMetalProviderName gets the provider name of equinixmetal
+	EquinixMetalProviderName = "equinixmetal"
+	// TencentcloudProviderName gets the provider name of tencentcloud
+	TencentcloudProviderName = "tencentcloud"
+	// ExternalGrpcProviderName gets the provider name of the external grpc provider
+	ExternalGrpcProviderName = "externalgrpc"
+	// CivoProviderName gets the provider name of civo
+	CivoProviderName = "civo"
+	// RancherProviderName gets the provider name of rancher
+	RancherProviderName = "rancher"
+	// UthoProviderName gets the provider name of utho
+	UthoProviderName = "utho"
 )
+
+// GpuConfig contains the label, type and the resource name for a GPU.
+type GpuConfig struct {
+	Label        string
+	Type         string
+	ResourceName apiv1.ResourceName
+}
 
 // CloudProvider contains configuration info and functions for interacting with
 // cloud provider (GCE, AWS, etc).
@@ -81,6 +116,10 @@ type CloudProvider interface {
 	// should not be processed by cluster autoscaler, or non-nil error if such
 	// occurred. Must be implemented.
 	NodeGroupForNode(*apiv1.Node) (NodeGroup, error)
+
+	// HasInstance returns whether the node has corresponding instance in cloud provider,
+	// true if the node has an instance, false if it no longer exists
+	HasInstance(*apiv1.Node) (bool, error)
 
 	// Pricing returns pricing model for this cloud provider or error if not available.
 	// Implementation optional.
@@ -104,6 +143,10 @@ type CloudProvider interface {
 
 	// GetAvailableGPUTypes return all available GPU types cloud provider supports.
 	GetAvailableGPUTypes() map[string]struct{}
+
+	// GetNodeGpuConfig returns the label, type and resource name for the GPU added to node. If node doesn't have
+	// any GPUs, it returns nil.
+	GetNodeGpuConfig(*apiv1.Node) *GpuConfig
 
 	// Cleanup cleans up open resources before the cloud provider is destroyed, i.e. go routines etc.
 	Cleanup() error
@@ -143,10 +186,24 @@ type NodeGroup interface {
 	// node group size is updated. Implementation required.
 	IncreaseSize(delta int) error
 
+	// AtomicIncreaseSize tries to increase the size of the node group atomically.
+	// It returns error if requesting the entire delta fails. The method doesn't wait until the new instances appear.
+	// Implementation is optional. Implementation of this method generally requires external cloud provider support
+	// for atomically requesting multiple instances. If implemented, CA will take advantage of the method while scaling up
+	// BestEffortAtomicScaleUp ProvisioningClass, guaranteeing that all instances required for such a
+	// ProvisioningRequest are provisioned atomically.
+	AtomicIncreaseSize(delta int) error
+
 	// DeleteNodes deletes nodes from this node group. Error is returned either on
 	// failure or if the given node doesn't belong to this node group. This function
 	// should wait until node group size is updated. Implementation required.
 	DeleteNodes([]*apiv1.Node) error
+
+	// ForceDeleteNodes deletes nodes from this node group, without checking for
+	// constraints like minimal size validation etc. Error is returned either on
+	// failure or if the given node doesn't belong to this node group. This function
+	// should wait until node group size is updated.
+	ForceDeleteNodes([]*apiv1.Node) error
 
 	// DecreaseTargetSize decreases the target size of the node group. This function
 	// doesn't permit to delete any existing node and can be used only to reduce the
@@ -167,13 +224,13 @@ type NodeGroup interface {
 	// This list should include also instances that might have not become a kubernetes node yet.
 	Nodes() ([]Instance, error)
 
-	// TemplateNodeInfo returns a schedulerframework.NodeInfo structure of an empty
+	// TemplateNodeInfo returns a framework.NodeInfo structure of an empty
 	// (as if just started) node. This will be used in scale-up simulations to
 	// predict what would a new node look like if a node group was expanded. The returned
 	// NodeInfo is expected to have a fully populated Node object, with all of the labels,
 	// capacity and allocatable information as well as all pods that are started on
 	// the node by default, using manifest (most likely only kube-proxy). Implementation optional.
-	TemplateNodeInfo() (*schedulerframework.NodeInfo, error)
+	TemplateNodeInfo() (*framework.NodeInfo, error)
 
 	// Exist checks if the node group really exists on the cloud provider side. Allows to tell the
 	// theoretical node group from the real one. Implementation required.
@@ -193,7 +250,7 @@ type NodeGroup interface {
 
 	// GetOptions returns NodeGroupAutoscalingOptions that should be used for this particular
 	// NodeGroup. Returning a nil will result in using default options.
-	// Implementation optional.
+	// Implementation optional. Callers MUST handle `cloudprovider.ErrNotImplemented`.
 	GetOptions(defaults config.NodeGroupAutoscalingOptions) (*config.NodeGroupAutoscalingOptions, error)
 }
 

@@ -19,32 +19,71 @@ package hetzner
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	apiv1 "k8s.io/api/core/v1"
+
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/hetzner/hcloud-go/hcloud"
+	"k8s.io/autoscaler/cluster-autoscaler/version"
 )
 
 var (
-	version = "dev"
+	httpClient = &http.Client{
+		Transport: instrumentedRoundTripper(),
+	}
 )
 
 // hetznerManager handles Hetzner communication and data caching of
 // node groups
 type hetznerManager struct {
-	client         *hcloud.Client
-	nodeGroups     map[string]*hetznerNodeGroup
-	apiCallContext context.Context
-	cloudInit      string
-	image          *hcloud.Image
-	sshKey         *hcloud.SSHKey
-	network        *hcloud.Network
-	createTimeout  time.Duration
+	client           *hcloud.Client
+	nodeGroups       map[string]*hetznerNodeGroup
+	apiCallContext   context.Context
+	clusterConfig    *ClusterConfig
+	sshKey           *hcloud.SSHKey
+	network          *hcloud.Network
+	firewall         *hcloud.Firewall
+	createTimeout    time.Duration
+	publicIPv4       bool
+	publicIPv6       bool
+	cachedServerType *serverTypeCache
+	cachedServers    *serversCache
+}
+
+// ClusterConfig holds the configuration for all the nodepools
+type ClusterConfig struct {
+	ImagesForArch    ImageList
+	NodeConfigs      map[string]*NodeConfig
+	IsUsingNewFormat bool
+	LegacyConfig     LegacyConfig
+}
+
+// ImageList holds the image id/names for the different architectures
+type ImageList struct {
+	Arm64 string
+	Amd64 string
+}
+
+// NodeConfig holds the configuration for a single nodepool
+type NodeConfig struct {
+	CloudInit      string
+	PlacementGroup string
+	Taints         []apiv1.Taint
+	Labels         map[string]string
+	ImagesForArch  *ImageList
+}
+
+// LegacyConfig holds the configuration in the legacy format
+type LegacyConfig struct {
+	CloudInit string
+	ImageName string
 }
 
 func newManager() (*hetznerManager, error) {
@@ -53,62 +92,101 @@ func newManager() (*hetznerManager, error) {
 		return nil, errors.New("`HCLOUD_TOKEN` is not specified")
 	}
 
-	cloudInitBase64 := os.Getenv("HCLOUD_CLOUD_INIT")
-	if cloudInitBase64 == "" {
-		return nil, errors.New("`HCLOUD_CLOUD_INIT` is not specified")
+	opts := []hcloud.ClientOption{
+		hcloud.WithToken(token),
+		hcloud.WithHTTPClient(httpClient),
+		hcloud.WithApplication("cluster-autoscaler", version.ClusterAutoscalerVersion),
+		hcloud.WithPollOpts(hcloud.PollOpts{
+			BackoffFunc: hcloud.ExponentialBackoff(2, 500*time.Millisecond),
+		}),
+		hcloud.WithDebugWriter(&debugWriter{}),
 	}
 
-	client := hcloud.NewClient(hcloud.WithToken(token))
+	endpoint := os.Getenv("HCLOUD_ENDPOINT")
+	if endpoint != "" {
+		opts = append(opts, hcloud.WithEndpoint(endpoint))
+	}
+
+	client := hcloud.NewClient(opts...)
+
 	ctx := context.Background()
-	cloudInit, err := base64.StdEncoding.DecodeString(cloudInitBase64)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse cloud init error: %s", err)
+	var err error
+
+	clusterConfigBase64 := os.Getenv("HCLOUD_CLUSTER_CONFIG")
+	clusterConfigFile := os.Getenv("HCLOUD_CLUSTER_CONFIG_FILE")
+	cloudInitBase64 := os.Getenv("HCLOUD_CLOUD_INIT")
+
+	if clusterConfigBase64 == "" && cloudInitBase64 == "" && clusterConfigFile == "" {
+		return nil, errors.New("neither `HCLOUD_CLUSTER_CONFIG`, `HCLOUD_CLOUD_INIT` nor `HCLOUD_CLUSTER_CONFIG_FILE` is specified")
+	}
+	var clusterConfig = &ClusterConfig{}
+
+	var clusterConfigJsonData []byte
+	var readErr error
+	if clusterConfigBase64 != "" {
+		clusterConfigJsonData, readErr = base64.StdEncoding.DecodeString(clusterConfigBase64)
+		if readErr != nil {
+			return nil, fmt.Errorf("failed to parse cluster config error: %s", readErr)
+		}
+	} else if clusterConfigFile != "" {
+		clusterConfigJsonData, readErr = os.ReadFile(clusterConfigFile)
+		if readErr != nil {
+			return nil, fmt.Errorf("failed to read cluster config file: %s", readErr)
+		}
 	}
 
-	imageName := os.Getenv("HCLOUD_IMAGE")
-	if imageName == "" {
-		imageName = "ubuntu-20.04"
-	}
-
-	// Search for an image ID corresponding to the supplied HCLOUD_IMAGE env
-	// variable. This value can either be an image ID itself (an int), a name
-	// (e.g. "ubuntu-20.04"), or a label selector associated with an image
-	// snapshot. In the latter case it will use the most recent snapshot.
-	image, _, err := client.Image.Get(ctx, imageName)
-	if err != nil {
-		return nil, fmt.Errorf("unable to find image %s: %v", imageName, err)
-	}
-	if image == nil {
-		images, err := client.Image.AllWithOpts(ctx, hcloud.ImageListOpts{
-			Type:   []hcloud.ImageType{hcloud.ImageTypeSnapshot},
-			Status: []hcloud.ImageStatus{hcloud.ImageStatusAvailable},
-			Sort:   []string{"created:desc"},
-			ListOpts: hcloud.ListOpts{
-				LabelSelector: imageName,
-			},
-		})
-
-		if err != nil || len(images) == 0 {
-			return nil, fmt.Errorf("unable to find image %s: %v", imageName, err)
+	if clusterConfigJsonData != nil {
+		unmarshalErr := json.Unmarshal(clusterConfigJsonData, &clusterConfig)
+		if unmarshalErr != nil {
+			return nil, fmt.Errorf("failed to unmarshal cluster config JSON: %s", unmarshalErr)
+		}
+		clusterConfig.IsUsingNewFormat = true
+	} else {
+		cloudInit, decErr := base64.StdEncoding.DecodeString(cloudInitBase64)
+		if decErr != nil {
+			return nil, fmt.Errorf("failed to parse cloud init error: %s", decErr)
 		}
 
-		image = images[0]
+		imageName := os.Getenv("HCLOUD_IMAGE")
+		if imageName == "" {
+			imageName = "ubuntu-20.04"
+		}
+
+		clusterConfig.LegacyConfig.CloudInit = string(cloudInit)
+		clusterConfig.LegacyConfig.ImageName = imageName
 	}
 
-	var network *hcloud.Network
-	networkName := os.Getenv("HCLOUD_NETWORK")
+	publicIPv4 := true
+	publicIPv4Str := os.Getenv("HCLOUD_PUBLIC_IPV4")
+	if publicIPv4Str != "" {
+		publicIPv4, err = strconv.ParseBool(publicIPv4Str)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse HCLOUD_PUBLIC_IPV4: %s", err)
+		}
+	}
+
+	publicIPv6 := true
+	publicIPv6Str := os.Getenv("HCLOUD_PUBLIC_IPV6")
+	if publicIPv6Str != "" {
+		publicIPv6, err = strconv.ParseBool(publicIPv6Str)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse HCLOUD_PUBLIC_IPV6: %s", err)
+		}
+	}
 
 	var sshKey *hcloud.SSHKey
-	sshKeyName := os.Getenv("HCLOUD_SSH_KEY")
-	if sshKeyName != "" {
-		sshKey, _, err = client.SSHKey.Get(ctx, sshKeyName)
+	sshKeyIdOrName := os.Getenv("HCLOUD_SSH_KEY")
+	if sshKeyIdOrName != "" {
+		sshKey, _, err = client.SSHKey.Get(ctx, sshKeyIdOrName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get ssh key error: %s", err)
 		}
 	}
 
-	if networkName != "" {
-		network, _, err = client.Network.Get(ctx, networkName)
+	var network *hcloud.Network
+	networkIdOrName := os.Getenv("HCLOUD_NETWORK")
+	if networkIdOrName != "" {
+		network, _, err = client.Network.Get(ctx, networkIdOrName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get network error: %s", err)
 		}
@@ -121,25 +199,28 @@ func newManager() (*hetznerManager, error) {
 		createTimeout = time.Duration(v) * time.Minute
 	}
 
-	m := &hetznerManager{
-		client:         client,
-		nodeGroups:     make(map[string]*hetznerNodeGroup),
-		cloudInit:      string(cloudInit),
-		image:          image,
-		sshKey:         sshKey,
-		network:        network,
-		createTimeout:  createTimeout,
-		apiCallContext: ctx,
+	var firewall *hcloud.Firewall
+	firewallIdOrName := os.Getenv("HCLOUD_FIREWALL")
+	if firewallIdOrName != "" {
+		firewall, _, err = client.Firewall.Get(ctx, firewallIdOrName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get firewall error: %s", err)
+		}
 	}
 
-	m.nodeGroups[drainingNodePoolId] = &hetznerNodeGroup{
-		manager:      m,
-		instanceType: "cx11",
-		region:       "fsn1",
-		targetSize:   0,
-		maxSize:      0,
-		minSize:      0,
-		id:           drainingNodePoolId,
+	m := &hetznerManager{
+		client:           client,
+		nodeGroups:       make(map[string]*hetznerNodeGroup),
+		sshKey:           sshKey,
+		network:          network,
+		firewall:         firewall,
+		createTimeout:    createTimeout,
+		apiCallContext:   ctx,
+		publicIPv4:       publicIPv4,
+		publicIPv6:       publicIPv6,
+		clusterConfig:    clusterConfig,
+		cachedServerType: newServerTypeCache(ctx, client),
+		cachedServers:    newServersCache(ctx, client),
 	}
 
 	return m, nil
@@ -152,13 +233,7 @@ func (m *hetznerManager) Refresh() error {
 }
 
 func (m *hetznerManager) allServers(nodeGroup string) ([]*hcloud.Server, error) {
-	listOptions := hcloud.ListOpts{
-		PerPage:       50,
-		LabelSelector: nodeGroupLabel + "=" + nodeGroup,
-	}
-
-	requestOptions := hcloud.ServerListOpts{ListOpts: listOptions}
-	servers, err := m.client.Server.AllWithOpts(m.apiCallContext, requestOptions)
+	servers, err := m.cachedServers.getServersByNodeGroupName(nodeGroup)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get servers for hcloud: %v", err)
 	}
@@ -180,24 +255,29 @@ func (m *hetznerManager) deleteByNode(node *apiv1.Node) error {
 }
 
 func (m *hetznerManager) deleteServer(server *hcloud.Server) error {
-	_, err := m.client.Server.Delete(m.apiCallContext, server)
+	_, _, err := m.client.Server.DeleteWithResult(m.apiCallContext, server)
 	return err
 }
 
-func (m *hetznerManager) addNodeToDrainingPool(node *apiv1.Node) (*hetznerNodeGroup, error) {
-	m.nodeGroups[drainingNodePoolId].targetSize += 1
-	return m.nodeGroups[drainingNodePoolId], nil
+func (m *hetznerManager) validProviderID(providerID string) bool {
+	return strings.HasPrefix(providerID, providerIDPrefix)
 }
 
 func (m *hetznerManager) serverForNode(node *apiv1.Node) (*hcloud.Server, error) {
 	var nodeIdOrName string
 	if node.Spec.ProviderID != "" {
+		if !m.validProviderID(node.Spec.ProviderID) {
+			// This cluster-autoscaler provider only handles Hetzner Cloud servers.
+			// Any other provider ID prefix is invalid, and we return no server. Returning an error here breaks hybrid
+			// clusters with nodes from Hetzner Cloud & Robot (or other providers).
+			return nil, nil
+		}
 		nodeIdOrName = strings.TrimPrefix(node.Spec.ProviderID, providerIDPrefix)
 	} else {
 		nodeIdOrName = node.Name
 	}
 
-	server, _, err := m.client.Server.Get(m.apiCallContext, nodeIdOrName)
+	server, err := m.cachedServers.getServer(nodeIdOrName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get servers for node %s error: %v", node.Name, err)
 	}

@@ -26,8 +26,8 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/utils/errors"
 
 	apiv1 "k8s.io/api/core/v1"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
 	klog "k8s.io/klog/v2"
-	schedulerframework "k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
 // asg implements NodeGroup interface.
@@ -71,6 +71,11 @@ func (asg *asg) IncreaseSize(delta int) error {
 	return nil
 }
 
+// AtomicIncreaseSize is not implemented.
+func (asg *asg) AtomicIncreaseSize(delta int) error {
+	return cloudprovider.ErrNotImplemented
+}
+
 // DecreaseTargetSize decreases the target size of the node group. This function
 // doesn't permit to delete any existing node and can be used only to reduce the
 // request for new nodes that have not been yet fulfilled. Delta should be negative.
@@ -83,6 +88,9 @@ func (asg *asg) DecreaseTargetSize(delta int) error {
 // Belongs returns true if the given node belongs to the NodeGroup.
 func (asg *asg) Belongs(node *apiv1.Node) (bool, error) {
 	for _, vm := range asg.cluster.VirtualMachines {
+		if vm.Name != "" && node.Name != "" && vm.Name == node.Name {
+			return true, nil
+		}
 		if vm.ID == node.Status.NodeInfo.SystemUUID {
 			return true, nil
 		}
@@ -98,7 +106,11 @@ func (asg *asg) DeleteNodes(nodes []*apiv1.Node) error {
 
 	nodeIDs := make([]string, len(nodes))
 	for i, node := range nodes {
-		nodeIDs[i] = node.Status.NodeInfo.SystemUUID
+		if vm, ok := asg.cluster.VirtualMachineMap[node.Name]; ok {
+			nodeIDs[i] = vm.ID
+		} else {
+			nodeIDs[i] = node.Status.NodeInfo.SystemUUID
+		}
 	}
 	if len(nodeIDs) == 0 {
 		return fmt.Errorf("Unable to fetch nodeids from %v", nodes)
@@ -109,6 +121,11 @@ func (asg *asg) DeleteNodes(nodes []*apiv1.Node) error {
 	}
 	asg.Copy(cluster)
 	return nil
+}
+
+// ForceDeleteNodes deletes nodes from the group regardless of constraints.
+func (asg *asg) ForceDeleteNodes(nodes []*apiv1.Node) error {
+	return cloudprovider.ErrNotImplemented
 }
 
 // Id returns cluster id.
@@ -156,7 +173,7 @@ func (asg *asg) Delete() error {
 }
 
 // TemplateNodeInfo returns a node template for this node group.
-func (asg *asg) TemplateNodeInfo() (*schedulerframework.NodeInfo, error) {
+func (asg *asg) TemplateNodeInfo() (*framework.NodeInfo, error) {
 	return nil, cloudprovider.ErrNotImplemented
 }
 

@@ -1,5 +1,5 @@
-//go:build exoscale
-// +build exoscale
+//go:build ovhcloud
+// +build ovhcloud
 
 /*
 Copyright 2020 The Kubernetes Authors.
@@ -21,18 +21,20 @@ package builder
 
 import (
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
+	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/ovhcloud"
 	"k8s.io/autoscaler/cluster-autoscaler/config"
+	"k8s.io/client-go/informers"
 )
 
-// AvailableCloudProviders supported by the Hetzner cloud provider builder.
+// AvailableCloudProviders supported by the OVHcloud cloud provider builder.
 var AvailableCloudProviders = []string{
 	cloudprovider.OVHcloudProviderName,
 }
 
-// DefaultCloudProvider is OVHcloud.
+// DefaultCloudProvider for OVHcloud-only build is OVHcloud.
 const DefaultCloudProvider = cloudprovider.OVHcloudProviderName
 
-func buildCloudProvider(opts config.AutoscalingOptions, do cloudprovider.NodeGroupDiscoveryOptions, rl *cloudprovider.ResourceLimiter) cloudprovider.CloudProvider {
+func buildCloudProvider(opts config.AutoscalingOptions, do cloudprovider.NodeGroupDiscoveryOptions, rl *cloudprovider.ResourceLimiter, _ informers.SharedInformerFactory) cloudprovider.CloudProvider {
 	switch opts.CloudProviderName {
 	case cloudprovider.OVHcloudProviderName:
 		return ovhcloud.BuildOVHcloud(opts, do, rl)

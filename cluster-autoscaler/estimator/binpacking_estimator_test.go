@@ -20,99 +20,277 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/autoscaler/cluster-autoscaler/simulator"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/clustersnapshot/testsnapshot"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
 	. "k8s.io/autoscaler/cluster-autoscaler/utils/test"
 	"k8s.io/autoscaler/cluster-autoscaler/utils/units"
-	schedulerframework "k8s.io/kubernetes/pkg/scheduler/framework"
-
-	"github.com/stretchr/testify/assert"
 )
 
-func makePod(cpuPerPod, memoryPerPod int64) *apiv1.Pod {
-	return &apiv1.Pod{
-		Spec: apiv1.PodSpec{
-			Containers: []apiv1.Container{
-				{
-					Resources: apiv1.ResourceRequirements{
-						Requests: apiv1.ResourceList{
-							apiv1.ResourceCPU:    *resource.NewMilliQuantity(cpuPerPod, resource.DecimalSI),
-							apiv1.ResourceMemory: *resource.NewQuantity(memoryPerPod, resource.DecimalSI),
-						},
-					},
-				},
+func makePodEquivalenceGroup(pod *apiv1.Pod, podCount int) PodEquivalenceGroup {
+	pods := []*apiv1.Pod{}
+	for i := 0; i < podCount; i++ {
+		pods = append(pods, pod)
+	}
+	return PodEquivalenceGroup{
+		Pods: pods,
+	}
+}
+
+func makeNode(cpu, mem, podCount int64, name string, zone string) *apiv1.Node {
+	node := &apiv1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+			Labels: map[string]string{
+				"kubernetes.io/hostname":      name,
+				"topology.kubernetes.io/zone": zone,
+			},
+		},
+		Status: apiv1.NodeStatus{
+			Capacity: apiv1.ResourceList{
+				apiv1.ResourceCPU:    *resource.NewMilliQuantity(cpu, resource.DecimalSI),
+				apiv1.ResourceMemory: *resource.NewQuantity(mem*units.MiB, resource.DecimalSI),
+				apiv1.ResourcePods:   *resource.NewQuantity(podCount, resource.DecimalSI),
 			},
 		},
 	}
+	node.Status.Allocatable = node.Status.Capacity
+	SetNodeReadyState(node, true, time.Time{})
+	return node
 }
 
 func TestBinpackingEstimate(t *testing.T) {
-	estimator := newBinPackingEstimator(t)
-
-	cpuPerPod := int64(350)
-	memoryPerPod := int64(1000 * units.MiB)
-	pod := makePod(cpuPerPod, memoryPerPod)
-
-	pods := make([]*apiv1.Pod, 0)
-	for i := 0; i < 10; i++ {
-		pods = append(pods, pod)
-	}
-	node := &apiv1.Node{
-		Status: apiv1.NodeStatus{
-			Capacity: apiv1.ResourceList{
-				apiv1.ResourceCPU:    *resource.NewMilliQuantity(cpuPerPod*3-50, resource.DecimalSI),
-				apiv1.ResourceMemory: *resource.NewQuantity(2*memoryPerPod, resource.DecimalSI),
-				apiv1.ResourcePods:   *resource.NewQuantity(10, resource.DecimalSI),
-			},
-		},
-	}
-	node.Status.Allocatable = node.Status.Capacity
-	SetNodeReadyState(node, true, time.Time{})
-
-	nodeInfo := schedulerframework.NewNodeInfo()
-	nodeInfo.SetNode(node)
-	estimate := estimator.Estimate(pods, nodeInfo)
-	assert.Equal(t, 5, estimate)
-}
-
-func TestBinpackingEstimateWithPorts(t *testing.T) {
-	estimator := newBinPackingEstimator(t)
-
-	cpuPerPod := int64(200)
-	memoryPerPod := int64(1000 * units.MiB)
-	pod := makePod(cpuPerPod, memoryPerPod)
-	pod.Spec.Containers[0].Ports = []apiv1.ContainerPort{
+	highResourcePodGroup := makePodEquivalenceGroup(
+		BuildTestPod(
+			"estimatee",
+			500,
+			1000,
+			WithNamespace("universe"),
+			WithLabels(map[string]string{
+				"app": "estimatee",
+			}),
+		),
+		10,
+	)
+	testCases := []struct {
+		name                 string
+		millicores           int64
+		memory               int64
+		maxNodes             int
+		podsEquivalenceGroup []PodEquivalenceGroup
+		topologySpreadingKey string
+		expectNodeCount      int
+		expectPodCount       int
+		expectProcessedPods  []*apiv1.Pod
+	}{
 		{
-			HostPort: 5555,
+			name:       "simple resource-based binpacking",
+			millicores: 350*3 - 50,
+			memory:     2 * 1000,
+			podsEquivalenceGroup: []PodEquivalenceGroup{makePodEquivalenceGroup(
+				BuildTestPod(
+					"estimatee",
+					350,
+					1000,
+					WithNamespace("universe"),
+					WithLabels(map[string]string{
+						"app": "estimatee",
+					})), 10)},
+			expectNodeCount: 5,
+			expectPodCount:  10,
+		},
+		{
+			name:       "pods-per-node bound binpacking",
+			millicores: 10000,
+			memory:     20000,
+			podsEquivalenceGroup: []PodEquivalenceGroup{makePodEquivalenceGroup(
+				BuildTestPod(
+					"estimatee",
+					10,
+					100,
+					WithNamespace("universe"),
+					WithLabels(map[string]string{
+						"app": "estimatee",
+					})), 20)},
+			expectNodeCount: 2,
+			expectPodCount:  20,
+		},
+		{
+			name:       "hostport conflict forces pod-per-node",
+			millicores: 1000,
+			memory:     5000,
+			podsEquivalenceGroup: []PodEquivalenceGroup{makePodEquivalenceGroup(
+				BuildTestPod(
+					"estimatee",
+					200,
+					1000,
+					WithNamespace("universe"),
+					WithLabels(map[string]string{
+						"app": "estimatee",
+					}),
+					WithHostPort(5555)), 8)},
+			expectNodeCount: 8,
+			expectPodCount:  8,
+		},
+		{
+			name:       "limiter cuts binpacking",
+			millicores: 1000,
+			memory:     5000,
+			podsEquivalenceGroup: []PodEquivalenceGroup{makePodEquivalenceGroup(
+				BuildTestPod(
+					"estimatee",
+					500,
+					1000,
+					WithNamespace("universe"),
+					WithLabels(map[string]string{
+						"app": "estimatee",
+					})), 20)},
+			maxNodes:        5,
+			expectNodeCount: 5,
+			expectPodCount:  10,
+		},
+		{
+			name:       "decreasing ordered pods are processed first",
+			millicores: 1000,
+			memory:     5000,
+			podsEquivalenceGroup: append([]PodEquivalenceGroup{makePodEquivalenceGroup(
+				BuildTestPod(
+					"estimatee",
+					50,
+					1000,
+					WithNamespace("universe"),
+					WithLabels(map[string]string{
+						"app": "estimatee",
+					})), 10)}, highResourcePodGroup),
+			maxNodes:            5,
+			expectNodeCount:     5,
+			expectPodCount:      10,
+			expectProcessedPods: highResourcePodGroup.Pods,
+		},
+		{
+			name:       "hostname topology spreading with maxSkew=2 forces 2 pods/node",
+			millicores: 1000,
+			memory:     5000,
+			podsEquivalenceGroup: []PodEquivalenceGroup{makePodEquivalenceGroup(
+				BuildTestPod(
+					"estimatee",
+					200,
+					200,
+					WithNamespace("universe"),
+					WithLabels(map[string]string{
+						"app": "estimatee",
+					}),
+					WithMaxSkew(2, "kubernetes.io/hostname", 1)), 8)},
+			expectNodeCount: 4,
+			expectPodCount:  8,
+		},
+		{
+			name:       "zonal topology spreading with maxSkew=2 only allows 2 pods to schedule",
+			millicores: 1000,
+			memory:     5000,
+			podsEquivalenceGroup: []PodEquivalenceGroup{makePodEquivalenceGroup(
+				BuildTestPod(
+					"estimatee",
+					20,
+					100,
+					WithNamespace("universe"),
+					WithLabels(map[string]string{
+						"app": "estimatee",
+					}),
+					WithMaxSkew(2, "topology.kubernetes.io/zone", 1)), 8)},
+			expectNodeCount: 1,
+			expectPodCount:  2,
+		},
+		{
+			name:       "hostname topology spreading with maxSkew=1 with a large scaleup handles scheduling pods retroactively",
+			millicores: 1000,
+			memory:     5000,
+			podsEquivalenceGroup: []PodEquivalenceGroup{makePodEquivalenceGroup(
+				BuildTestPod(
+					"estimatee",
+					20,
+					100,
+					WithNamespace("universe"),
+					WithLabels(map[string]string{
+						"app": "estimatee",
+					}),
+					WithMaxSkew(1, "kubernetes.io/hostname", 3)), 12)},
+			expectNodeCount: 3,
+			expectPodCount:  12,
 		},
 	}
-	pods := make([]*apiv1.Pod, 0)
-	for i := 0; i < 8; i++ {
-		pods = append(pods, pod)
-	}
-	node := &apiv1.Node{
-		Status: apiv1.NodeStatus{
-			Capacity: apiv1.ResourceList{
-				apiv1.ResourceCPU:    *resource.NewMilliQuantity(5*cpuPerPod, resource.DecimalSI),
-				apiv1.ResourceMemory: *resource.NewQuantity(5*memoryPerPod, resource.DecimalSI),
-				apiv1.ResourcePods:   *resource.NewQuantity(10, resource.DecimalSI),
-			},
-		},
-	}
-	node.Status.Allocatable = node.Status.Capacity
-	SetNodeReadyState(node, true, time.Time{})
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			clusterSnapshot := testsnapshot.NewTestSnapshotOrDie(t)
+			// Add one node in different zone to trigger topology spread constraints
+			err := clusterSnapshot.AddNodeInfo(framework.NewTestNodeInfo(makeNode(100, 100, 10, "oldnode", "zone-jupiter")))
+			assert.NoError(t, err)
 
-	nodeInfo := schedulerframework.NewNodeInfo()
-	nodeInfo.SetNode(node)
-	estimate := estimator.Estimate(pods, nodeInfo)
-	assert.Equal(t, 8, estimate)
+			limiter := NewThresholdBasedEstimationLimiter([]Threshold{NewStaticThreshold(tc.maxNodes, time.Duration(0))})
+			processor := NewDecreasingPodOrderer()
+			estimator := NewBinpackingNodeEstimator(clusterSnapshot, limiter, processor, nil /* EstimationContext */, nil /* EstimationAnalyserFunc */)
+			node := makeNode(tc.millicores, tc.memory, 10, "template", "zone-mars")
+			nodeInfo := framework.NewTestNodeInfo(node)
+
+			estimatedNodes, estimatedPods := estimator.Estimate(tc.podsEquivalenceGroup, nodeInfo, nil)
+			assert.Equal(t, tc.expectNodeCount, estimatedNodes)
+			assert.Equal(t, tc.expectPodCount, len(estimatedPods))
+			if tc.expectProcessedPods != nil {
+				assert.Equal(t, tc.expectProcessedPods, estimatedPods)
+			}
+		})
+	}
 }
 
-func newBinPackingEstimator(t *testing.T) *BinpackingNodeEstimator {
-	predicateChecker, err := simulator.NewTestPredicateChecker()
-	clusterSnapshot := simulator.NewBasicClusterSnapshot()
-	assert.NoError(t, err)
-	estimator := NewBinpackingNodeEstimator(predicateChecker, clusterSnapshot)
-	return estimator
+func BenchmarkBinpackingEstimate(b *testing.B) {
+	millicores := int64(1000)
+	memory := int64(5000)
+	podsPerNode := int64(100)
+	maxNodes := 3000
+	expectNodeCount := 2595
+	expectPodCount := 51000
+	podsEquivalenceGroup := []PodEquivalenceGroup{
+		makePodEquivalenceGroup(
+			BuildTestPod(
+				"estimatee",
+				50,
+				100,
+				WithNamespace("universe"),
+				WithLabels(map[string]string{
+					"app": "estimatee",
+				})),
+			50000,
+		),
+		makePodEquivalenceGroup(
+			BuildTestPod(
+				"estimatee",
+				95,
+				190,
+				WithNamespace("universe"),
+				WithLabels(map[string]string{
+					"app": "estimatee",
+				})),
+			1000,
+		),
+	}
+
+	for i := 0; i < b.N; i++ {
+		clusterSnapshot := testsnapshot.NewTestSnapshotOrDie(b)
+		err := clusterSnapshot.AddNodeInfo(framework.NewTestNodeInfo(makeNode(100, 100, 10, "oldnode", "zone-jupiter")))
+		assert.NoError(b, err)
+
+		limiter := NewThresholdBasedEstimationLimiter([]Threshold{NewStaticThreshold(maxNodes, time.Duration(0))})
+		processor := NewDecreasingPodOrderer()
+		estimator := NewBinpackingNodeEstimator(clusterSnapshot, limiter, processor, nil /* EstimationContext */, nil /* EstimationAnalyserFunc */)
+		node := makeNode(millicores, memory, podsPerNode, "template", "zone-mars")
+		nodeInfo := framework.NewTestNodeInfo(node)
+
+		estimatedNodes, estimatedPods := estimator.Estimate(podsEquivalenceGroup, nodeInfo, nil)
+		assert.Equal(b, expectNodeCount, estimatedNodes)
+		assert.Equal(b, expectPodCount, len(estimatedPods))
+	}
 }

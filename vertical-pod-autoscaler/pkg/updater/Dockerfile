@@ -12,12 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+FROM --platform=$BUILDPLATFORM golang:1.24.6 AS builder
 
-FROM gcr.io/distroless/static:latest
-MAINTAINER Marcin Wielgus "mwielgus@google.com"
+WORKDIR /workspace
 
-ARG ARCH
-COPY updater-$ARCH /updater
+# Copy the Go Modules manifests
+COPY go.mod go.mod
+COPY go.sum go.sum
+
+RUN go mod download
+
+COPY common common
+COPY pkg pkg
+
+ARG TARGETOS TARGETARCH
+ARG BUILD_LD_FLAGS="-s"
+
+RUN CGO_ENABLED=0 LD_FLAGS=-s GOARCH=$TARGETARCH GOOS=$TARGETOS go build -C pkg/updater -ldflags="${BUILD_LD_FLAGS}" -o updater-$TARGETARCH
+
+FROM gcr.io/distroless/static:nonroot
+
+ARG TARGETARCH
+
+COPY --from=builder /workspace/pkg/updater/updater-$TARGETARCH /updater
 
 ENTRYPOINT ["/updater"]
-CMD ["--v=4", "--stderrthreshold=info"]

@@ -1,19 +1,3 @@
-/*
-Copyright 2018 The Kubernetes Authors.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package hcloud
 
 import (
@@ -22,20 +6,27 @@ import (
 	"net/url"
 	"strconv"
 
+	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/hetzner/hcloud-go/hcloud/exp/ctxutil"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/hetzner/hcloud-go/hcloud/schema"
 )
 
 // ServerType represents a server type in the Hetzner Cloud.
 type ServerType struct {
-	ID          int
-	Name        string
-	Description string
-	Cores       int
-	Memory      float32
-	Disk        int
-	StorageType StorageType
-	CPUType     CPUType
-	Pricings    []ServerTypeLocationPricing
+	ID           int64
+	Name         string
+	Description  string
+	Cores        int
+	Memory       float32
+	Disk         int
+	StorageType  StorageType
+	CPUType      CPUType
+	Architecture Architecture
+
+	// Deprecated: [ServerType.IncludedTraffic] is deprecated and will always report 0 after 2024-08-05.
+	// Use [ServerType.Pricings] instead to get the included traffic for each location.
+	IncludedTraffic int64
+	Pricings        []ServerTypeLocationPricing
+	DeprecatableResource
 }
 
 // StorageType specifies the type of storage.
@@ -56,7 +47,7 @@ const (
 	// CPUTypeShared is the type for shared CPU.
 	CPUTypeShared CPUType = "shared"
 
-	//CPUTypeDedicated is the type for dedicated CPU.
+	// CPUTypeDedicated is the type for dedicated CPU.
 	CPUTypeDedicated CPUType = "dedicated"
 )
 
@@ -66,40 +57,35 @@ type ServerTypeClient struct {
 }
 
 // GetByID retrieves a server type by its ID. If the server type does not exist, nil is returned.
-func (c *ServerTypeClient) GetByID(ctx context.Context, id int) (*ServerType, *Response, error) {
-	req, err := c.client.NewRequest(ctx, "GET", fmt.Sprintf("/server_types/%d", id), nil)
-	if err != nil {
-		return nil, nil, err
-	}
+func (c *ServerTypeClient) GetByID(ctx context.Context, id int64) (*ServerType, *Response, error) {
+	const opPath = "/server_types/%d"
+	ctx = ctxutil.SetOpPath(ctx, opPath)
 
-	var body schema.ServerTypeGetResponse
-	resp, err := c.client.Do(req, &body)
+	reqPath := fmt.Sprintf(opPath, id)
+
+	respBody, resp, err := getRequest[schema.ServerTypeGetResponse](ctx, c.client, reqPath)
 	if err != nil {
 		if IsError(err, ErrorCodeNotFound) {
 			return nil, resp, nil
 		}
-		return nil, nil, err
+		return nil, resp, err
 	}
-	return ServerTypeFromSchema(body.ServerType), resp, nil
+
+	return ServerTypeFromSchema(respBody.ServerType), resp, nil
 }
 
 // GetByName retrieves a server type by its name. If the server type does not exist, nil is returned.
 func (c *ServerTypeClient) GetByName(ctx context.Context, name string) (*ServerType, *Response, error) {
-	if name == "" {
-		return nil, nil, nil
-	}
-	serverTypes, response, err := c.List(ctx, ServerTypeListOpts{Name: name})
-	if len(serverTypes) == 0 {
-		return nil, response, err
-	}
-	return serverTypes[0], response, err
+	return firstByName(name, func() ([]*ServerType, *Response, error) {
+		return c.List(ctx, ServerTypeListOpts{Name: name})
+	})
 }
 
 // Get retrieves a server type by its ID if the input can be parsed as an integer, otherwise it
 // retrieves a server type by its name. If the server type does not exist, nil is returned.
 func (c *ServerTypeClient) Get(ctx context.Context, idOrName string) (*ServerType, *Response, error) {
-	if id, err := strconv.Atoi(idOrName); err == nil {
-		return c.GetByID(ctx, int(id))
+	if id, err := strconv.ParseInt(idOrName, 10, 64); err == nil {
+		return c.GetByID(ctx, id)
 	}
 	return c.GetByName(ctx, idOrName)
 }
@@ -108,12 +94,16 @@ func (c *ServerTypeClient) Get(ctx context.Context, idOrName string) (*ServerTyp
 type ServerTypeListOpts struct {
 	ListOpts
 	Name string
+	Sort []string
 }
 
 func (l ServerTypeListOpts) values() url.Values {
-	vals := l.ListOpts.values()
+	vals := l.ListOpts.Values()
 	if l.Name != "" {
 		vals.Add("name", l.Name)
+	}
+	for _, sort := range l.Sort {
+		vals.Add("sort", sort)
 	}
 	return vals
 }
@@ -123,43 +113,28 @@ func (l ServerTypeListOpts) values() url.Values {
 // Please note that filters specified in opts are not taken into account
 // when their value corresponds to their zero value or when they are empty.
 func (c *ServerTypeClient) List(ctx context.Context, opts ServerTypeListOpts) ([]*ServerType, *Response, error) {
-	path := "/server_types?" + opts.values().Encode()
-	req, err := c.client.NewRequest(ctx, "GET", path, nil)
+	const opPath = "/server_types?%s"
+	ctx = ctxutil.SetOpPath(ctx, opPath)
+
+	reqPath := fmt.Sprintf(opPath, opts.values().Encode())
+
+	respBody, resp, err := getRequest[schema.ServerTypeListResponse](ctx, c.client, reqPath)
 	if err != nil {
-		return nil, nil, err
+		return nil, resp, err
 	}
 
-	var body schema.ServerTypeListResponse
-	resp, err := c.client.Do(req, &body)
-	if err != nil {
-		return nil, nil, err
-	}
-	serverTypes := make([]*ServerType, 0, len(body.ServerTypes))
-	for _, s := range body.ServerTypes {
-		serverTypes = append(serverTypes, ServerTypeFromSchema(s))
-	}
-	return serverTypes, resp, nil
+	return allFromSchemaFunc(respBody.ServerTypes, ServerTypeFromSchema), resp, nil
 }
 
 // All returns all server types.
 func (c *ServerTypeClient) All(ctx context.Context) ([]*ServerType, error) {
-	allServerTypes := []*ServerType{}
+	return c.AllWithOpts(ctx, ServerTypeListOpts{ListOpts: ListOpts{PerPage: 50}})
+}
 
-	opts := ServerTypeListOpts{}
-	opts.PerPage = 50
-
-	_, err := c.client.all(func(page int) (*Response, error) {
+// AllWithOpts returns all server types for the given options.
+func (c *ServerTypeClient) AllWithOpts(ctx context.Context, opts ServerTypeListOpts) ([]*ServerType, error) {
+	return iterPages(func(page int) ([]*ServerType, *Response, error) {
 		opts.Page = page
-		serverTypes, resp, err := c.List(ctx, opts)
-		if err != nil {
-			return resp, err
-		}
-		allServerTypes = append(allServerTypes, serverTypes...)
-		return resp, nil
+		return c.List(ctx, opts)
 	})
-	if err != nil {
-		return nil, err
-	}
-
-	return allServerTypes, nil
 }

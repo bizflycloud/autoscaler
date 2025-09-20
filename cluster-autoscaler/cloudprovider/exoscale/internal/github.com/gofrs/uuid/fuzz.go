@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Kubernetes Authors.
+Copyright 2021 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 /*
-Copyright 2020 The Kubernetes Authors.
+Copyright 2021 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -31,7 +31,23 @@ limitations under the License.
 */
 
 /*
-Copyright 2020 The Kubernetes Authors.
+Copyright 2021 The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+/*
+Copyright 2021 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -73,15 +89,15 @@ package uuid
 //
 // To run:
 //
-//     $ go get github.com/dvyukov/go-fuzz/...
-//     $ cd $GOPATH/src/k8s.io/autoscaler/cluster-autoscaler/cloudprovider/exoscale/internal/uuid
-//     $ go-fuzz-build k8s.io/autoscaler/cluster-autoscaler/cloudprovider/exoscale/internal/uuid
-//     $ go-fuzz -bin=uuid-fuzz.zip -workdir=./testdata
+//	$ go get github.com/dvyukov/go-fuzz/...
+//	$ cd $GOPATH/src/k8s.io/autoscaler/cluster-autoscaler/cloudprovider/exoscale/internal/uuid
+//	$ go-fuzz-build k8s.io/autoscaler/cluster-autoscaler/cloudprovider/exoscale/internal/uuid
+//	$ go-fuzz -bin=uuid-fuzz.zip -workdir=./testdata
 //
 // If you make significant changes to FromString / UnmarshalText and add
 // new cases to fromStringTests (in codec_test.go), please run
 //
-//    $ go test -seed_fuzz_corpus
+//	$ go test -seed_fuzz_corpus
 //
 // to seed the corpus with the new interesting inputs, then run the fuzzer.
 func Fuzz(data []byte) int {

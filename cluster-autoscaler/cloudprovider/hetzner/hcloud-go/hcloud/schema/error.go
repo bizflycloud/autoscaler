@@ -1,19 +1,3 @@
-/*
-Copyright 2018 The Kubernetes Authors.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package schema
 
 import "encoding/json"
@@ -23,7 +7,7 @@ type Error struct {
 	Code       string          `json:"code"`
 	Message    string          `json:"message"`
 	DetailsRaw json.RawMessage `json:"details"`
-	Details    interface{}
+	Details    any             `json:"-"`
 }
 
 // UnmarshalJSON overrides default json unmarshalling.
@@ -33,9 +17,15 @@ func (e *Error) UnmarshalJSON(data []byte) (err error) {
 	if err = json.Unmarshal(data, alias); err != nil {
 		return
 	}
-	switch e.Code {
-	case "invalid_input":
+	if e.Code == "invalid_input" && len(e.DetailsRaw) > 0 {
 		details := ErrorDetailsInvalidInput{}
+		if err = json.Unmarshal(e.DetailsRaw, &details); err != nil {
+			return
+		}
+		alias.Details = details
+	}
+	if e.Code == "deprecated_api_endpoint" && len(e.DetailsRaw) > 0 {
+		details := ErrorDetailsDeprecatedAPIEndpoint{}
 		if err = json.Unmarshal(e.DetailsRaw, &details); err != nil {
 			return
 		}
@@ -56,4 +46,10 @@ type ErrorDetailsInvalidInput struct {
 		Name     string   `json:"name"`
 		Messages []string `json:"messages"`
 	} `json:"fields"`
+}
+
+// ErrorDetailsDeprecatedAPIEndpoint defines the schema of the Details field
+// of an error with code 'deprecated_api_endpoint'.
+type ErrorDetailsDeprecatedAPIEndpoint struct {
+	Announcement string `json:"announcement"`
 }

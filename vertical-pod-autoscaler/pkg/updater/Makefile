@@ -1,7 +1,7 @@
 all: build
 
 TAG?=dev
-REGISTRY?=staging-k8s.gcr.io
+REGISTRY?=gcr.io/k8s-staging-autoscaling
 FLAGS=
 TEST_ENVVAR=LD_FLAGS=-s GO111MODULE=on
 ENVVAR=CGO_ENABLED=0 $(TEST_ENVVAR)
@@ -9,6 +9,7 @@ GOOS?=linux
 COMPONENT=updater
 FULL_COMPONENT=vpa-${COMPONENT}
 
+BUILD_LD_FLAGS?=-s
 ALL_ARCHITECTURES?=amd64 arm arm64 ppc64le s390x
 export DOCKER_CLI_EXPERIMENTAL=enabled
 
@@ -18,13 +19,6 @@ build: clean
 
 build-binary: clean
 	$(ENVVAR) GOOS=$(GOOS) go build -o ${COMPONENT}
-
-.PHONY: build-binary-with-vendor
-build-binary-with-vendor: $(addprefix build-binary-with-vendor-,$(ALL_ARCHITECTURES)) clean
-
-.PHONY: build-binary-with-vendor-*
-build-binary-with-vendor-%:
-	$(ENVVAR) GOARCH=$* GOOS=$(GOOS) go build -mod vendor -o ${COMPONENT}-$*
 
 test-unit: clean build
 	$(TEST_ENVVAR) go test --test.short -race ./... $(FLAGS)
@@ -42,13 +36,10 @@ ifndef TAG
 	ERR = $(error TAG is undefined)
 	$(ERR)
 endif
-	docker build --pull -t ${REGISTRY}/${FULL_COMPONENT}-$*:${TAG} --build-arg ARCH=$* .
+	docker buildx build --pull --load --platform linux/$* --build-arg BUILD_LD_FLAGS="${BUILD_LD_FLAGS}" -t ${REGISTRY}/${FULL_COMPONENT}-$*:${TAG} -f ./Dockerfile ../../
 
 .PHONY: docker-push
-docker-push: $(addprefix sub-push-,$(ALL_ARCHITECTURES)) push-multi-arch;
-
-.PHONY: sub-push-*
-sub-push-%: docker-build-% do-push-% ;
+docker-push: $(addprefix do-push-,$(ALL_ARCHITECTURES)) push-multi-arch;
 
 .PHONY: do-push-*
 do-push-%:
@@ -68,18 +59,24 @@ push-multi-arch:
 	@for arch in $(ALL_ARCHITECTURES); do docker manifest annotate --arch $${arch} $(REGISTRY)/${FULL_COMPONENT}:$(TAG) $(REGISTRY)/${FULL_COMPONENT}-$${arch}:${TAG}; done
 	docker manifest push --purge $(REGISTRY)/${FULL_COMPONENT}:$(TAG)
 
-docker-builder:
-	docker build -t vpa-autoscaling-builder ../../builder
+.PHONY: show-git-info
+show-git-info:
+	echo '=============== local git status ==============='
+	git status
+	echo '=============== last commit ==============='
+	git log -1
+	echo '=============== bulding from the above ==============='
 
-.PHONY: build-in-docker
-build-in-docker: $(addprefix build-in-docker-,$(ALL_ARCHITECTURES))
+.PHONY: create-buildx-builder
+create-buildx-builder:
+	BUILDER=$(shell docker buildx create --driver=docker-container --use)
 
-.PHONY: build-in-docker-*
-build-in-docker-%: clean docker-builder
-	docker run -v `pwd`/../..:/gopath/src/k8s.io/autoscaler/vertical-pod-autoscaler vpa-autoscaling-builder:latest bash -c 'cd /gopath/src/k8s.io/autoscaler/vertical-pod-autoscaler && make build-binary-with-vendor-$* -C pkg/updater'
+.PHONY: remove-buildx-builder
+remove-buildx-builder:
+	docker buildx rm ${BUILDER}
 
 .PHONY: release
-release: build-in-docker docker-build docker-push
+release: create-buildx-builder docker-build remove-buildx-builder docker-push
 	@echo "Full in-docker release ${FULL_COMPONENT}:${TAG} completed"
 
 clean: $(addprefix clean-,$(ALL_ARCHITECTURES))
@@ -92,3 +89,4 @@ format:
 	test -z "$$(find . -path ./vendor -prune -type f -o -name '*.go' -exec gofmt -s -w {} + | tee /dev/stderr)"
 
 .PHONY: all build test-unit clean format release
+

@@ -76,6 +76,18 @@ Return the appropriate apiVersion for podsecuritypolicy.
 {{- end -}}
 
 {{/*
+Return the appropriate apiVersion for podDisruptionBudget.
+*/}}
+{{- define "podDisruptionBudget.apiVersion" -}}
+{{- $kubeTargetVersion := default .Capabilities.KubeVersion.GitVersion .Values.kubeTargetVersionOverride }}
+{{- if semverCompare "<1.21-0" $kubeTargetVersion -}}
+{{- print "policy/v1beta1" -}}
+{{- else -}}
+{{- print "policy/v1" -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Return the service account name used by the pod.
 */}}
 {{- define "cluster-autoscaler.serviceAccountName" -}}
@@ -83,5 +95,66 @@ Return the service account name used by the pod.
     {{ default (include "cluster-autoscaler.fullname" .) .Values.rbac.serviceAccount.name }}
 {{- else -}}
     {{ default "default" .Values.rbac.serviceAccount.name }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Return true if the priority expander is enabled
+*/}}
+{{- define "cluster-autoscaler.priorityExpanderEnabled" -}}
+{{- $expanders := splitList "," (default "" .Values.extraArgs.expander) -}}
+{{- if has "priority" $expanders -}}
+{{- true -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+autoDiscovery.clusterName for clusterapi.
+*/}}
+{{- define "cluster-autoscaler.capiAutodiscovery.clusterName" -}}
+{{- print "clusterName=" -}}{{ tpl (.Values.autoDiscovery.clusterName) . }}
+{{- end -}}
+
+{{/*
+autoDiscovery.namespace for clusterapi.
+*/}}
+{{- define "cluster-autoscaler.capiAutodiscovery.namespace" -}}
+{{- print "namespace=" }}{{ .Values.autoDiscovery.namespace -}}
+{{- end -}}
+
+{{/*
+autoDiscovery.labels for clusterapi.
+*/}}
+{{- define "cluster-autoscaler.capiAutodiscovery.labels" -}}
+{{- range $i, $el := .Values.autoDiscovery.labels -}}
+{{- if $i -}}{{- print "," -}}{{- end -}}
+{{- range $key, $val := $el -}}
+{{- $key -}}{{- print "=" -}}{{- $val -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Return the autodiscoveryparameters for clusterapi.
+*/}}
+{{- define "cluster-autoscaler.capiAutodiscoveryConfig" -}}
+{{- if .Values.autoDiscovery.clusterName -}}
+{{ include "cluster-autoscaler.capiAutodiscovery.clusterName" . }}
+    {{- if .Values.autoDiscovery.namespace }}
+    {{- print "," -}}
+    {{ include "cluster-autoscaler.capiAutodiscovery.namespace" . }}
+    {{- end -}}
+    {{- if .Values.autoDiscovery.labels }}
+    {{- print "," -}}
+    {{ include "cluster-autoscaler.capiAutodiscovery.labels" . }}
+    {{- end -}}
+{{- else if .Values.autoDiscovery.namespace -}}
+{{ include "cluster-autoscaler.capiAutodiscovery.namespace" . }}
+    {{- if .Values.autoDiscovery.labels }}
+    {{- print "," -}}
+    {{ include "cluster-autoscaler.capiAutodiscovery.labels" . }}
+    {{- end -}}
+{{- else if .Values.autoDiscovery.labels -}}
+    {{ include "cluster-autoscaler.capiAutodiscovery.labels" . }}
 {{- end -}}
 {{- end -}}

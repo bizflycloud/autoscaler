@@ -17,10 +17,13 @@ limitations under the License.
 package pod
 
 import (
+	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/kubelet/types"
 
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	resourcehelper "k8s.io/component-helpers/resource"
 )
 
 const (
@@ -35,11 +38,7 @@ func IsDaemonSetPod(pod *apiv1.Pod) bool {
 		return true
 	}
 
-	if val, ok := pod.Annotations[DaemonSetPodAnnotationKey]; ok && val == "true" {
-		return true
-	}
-
-	return false
+	return pod.Annotations[DaemonSetPodAnnotationKey] == "true"
 }
 
 // IsMirrorPod checks whether the pod is a mirror pod.
@@ -59,4 +58,38 @@ func IsStaticPod(pod *apiv1.Pod) bool {
 		}
 	}
 	return false
+}
+
+// FilterRecreatablePods filters pods that will be recreated by their controllers
+func FilterRecreatablePods(pods []*apiv1.Pod) []*apiv1.Pod {
+	filtered := make([]*apiv1.Pod, 0, len(pods))
+	for _, p := range pods {
+		if IsStaticPod(p) || IsMirrorPod(p) || IsDaemonSetPod(p) {
+			continue
+		}
+		filtered = append(filtered, p)
+	}
+	return filtered
+}
+
+// ClearPodNodeNames removes node name from pods
+func ClearPodNodeNames(pods []*apiv1.Pod) []*apiv1.Pod {
+	newPods := make([]*apiv1.Pod, 0, len(pods))
+	for _, podPtr := range pods {
+		newPod := *podPtr
+		newPod.Spec.NodeName = ""
+		newPods = append(newPods, &newPod)
+	}
+	return newPods
+}
+
+// PodRequests calculates Pod requests using a common resource helper shared with the scheduler
+func PodRequests(pod *apiv1.Pod) apiv1.ResourceList {
+	inPlacePodVerticalScalingEnabled := utilfeature.DefaultFeatureGate.Enabled(features.InPlacePodVerticalScaling)
+	podLevelResourcesEnabled := utilfeature.DefaultFeatureGate.Enabled(features.PodLevelResources)
+
+	return resourcehelper.PodRequests(pod, resourcehelper.PodResourcesOptions{
+		UseStatusResources:    inPlacePodVerticalScalingEnabled,
+		SkipPodLevelResources: !podLevelResourcesEnabled,
+	})
 }

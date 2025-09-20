@@ -111,11 +111,11 @@ func (c *Client) AddServersToServerGroup(identifier string, serverIds []string) 
 	return group, nil
 }
 
-// RemoveServersToServerGroup removes servers from an existing server group.
+// RemoveServersFromServerGroup removes servers from an existing server group.
 //
 // The identifier parameter specifies the group.
 //
-// The serverIds paramater specifies the identifiers of the servers you want to remove.
+// The serverIds parameter specifies the identifiers of the servers you want to remove.
 func (c *Client) RemoveServersFromServerGroup(identifier string, serverIds []string) (*ServerGroup, error) {
 	group := new(ServerGroup)
 	opts := new(serverGroupMemberOptions)
@@ -131,7 +131,7 @@ func (c *Client) RemoveServersFromServerGroup(identifier string, serverIds []str
 
 // MoveServersToServerGroup atomically moves servers from one group to another.
 //
-// The src parameter specifies the group to which the servers currently belong
+// # The src parameter specifies the group to which the servers currently belong
 //
 // The dst parameter specifies the group to which you want to move the servers.
 //

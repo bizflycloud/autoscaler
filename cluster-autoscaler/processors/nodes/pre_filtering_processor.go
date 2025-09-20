@@ -54,7 +54,7 @@ func (n *PreFilteringScaleDownNodeProcessor) GetScaleDownCandidates(ctx *context
 			continue
 		}
 		if nodeGroup == nil || reflect.ValueOf(nodeGroup).IsNil() {
-			klog.V(4).Infof("Node %s should not be processed by cluster autoscaler (no node group config)", node.Name)
+			klog.V(5).Infof("Node %s should not be processed by cluster autoscaler (no node group config)", node.Name)
 			continue
 		}
 		size, found := nodeGroupSize[nodeGroup.Id()]
@@ -62,8 +62,9 @@ func (n *PreFilteringScaleDownNodeProcessor) GetScaleDownCandidates(ctx *context
 			klog.Errorf("Error while checking node group size %s: group size not found", nodeGroup.Id())
 			continue
 		}
-		if size <= nodeGroup.MinSize() {
-			klog.V(1).Infof("Skipping %s - node group min size reached", node.Name)
+		minSize := nodeGroup.MinSize()
+		if size <= minSize {
+			klog.V(1).Infof("Skipping %s - node group min size reached (current: %d, min: %d)", node.Name, size, minSize)
 			continue
 		}
 		result = append(result, node)

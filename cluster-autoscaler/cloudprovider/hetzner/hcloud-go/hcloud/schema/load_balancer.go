@@ -1,25 +1,9 @@
-/*
-Copyright 2018 The Kubernetes Authors.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package schema
 
 import "time"
 
 type LoadBalancer struct {
-	ID               int                      `json:"id"`
+	ID               int64                    `json:"id"`
 	Name             string                   `json:"name"`
 	PublicNet        LoadBalancerPublicNet    `json:"public_net"`
 	PrivateNet       []LoadBalancerPrivateNet `json:"private_net"`
@@ -43,15 +27,17 @@ type LoadBalancerPublicNet struct {
 }
 
 type LoadBalancerPublicNetIPv4 struct {
-	IP string `json:"ip"`
+	IP     string `json:"ip"`
+	DNSPtr string `json:"dns_ptr"`
 }
 
 type LoadBalancerPublicNetIPv6 struct {
-	IP string `json:"ip"`
+	IP     string `json:"ip"`
+	DNSPtr string `json:"dns_ptr"`
 }
 
 type LoadBalancerPrivateNet struct {
-	Network int    `json:"network"`
+	Network int64  `json:"network"`
 	IP      string `json:"ip"`
 }
 
@@ -73,11 +59,11 @@ type LoadBalancerService struct {
 }
 
 type LoadBalancerServiceHTTP struct {
-	CookieName     string `json:"cookie_name"`
-	CookieLifetime int    `json:"cookie_lifetime"`
-	Certificates   []int  `json:"certificates"`
-	RedirectHTTP   bool   `json:"redirect_http"`
-	StickySessions bool   `json:"sticky_sessions"`
+	CookieName     string  `json:"cookie_name"`
+	CookieLifetime int     `json:"cookie_lifetime"`
+	Certificates   []int64 `json:"certificates"`
+	RedirectHTTP   bool    `json:"redirect_http"`
+	StickySessions bool    `json:"sticky_sessions"`
 }
 
 type LoadBalancerServiceHealthCheck struct {
@@ -113,7 +99,7 @@ type LoadBalancerTargetHealthStatus struct {
 }
 
 type LoadBalancerTargetServer struct {
-	ID int `json:"id"`
+	ID int64 `json:"id"`
 }
 
 type LoadBalancerTargetLabelSelector struct {
@@ -141,7 +127,7 @@ type LoadBalancerActionAddTargetRequest struct {
 }
 
 type LoadBalancerActionAddTargetRequestServer struct {
-	ID int `json:"id"`
+	ID int64 `json:"id"`
 }
 
 type LoadBalancerActionAddTargetRequestLabelSelector struct {
@@ -164,7 +150,7 @@ type LoadBalancerActionRemoveTargetRequest struct {
 }
 
 type LoadBalancerActionRemoveTargetRequestServer struct {
-	ID int `json:"id"`
+	ID int64 `json:"id"`
 }
 
 type LoadBalancerActionRemoveTargetRequestLabelSelector struct {
@@ -189,11 +175,11 @@ type LoadBalancerActionAddServiceRequest struct {
 }
 
 type LoadBalancerActionAddServiceRequestHTTP struct {
-	CookieName     *string `json:"cookie_name,omitempty"`
-	CookieLifetime *int    `json:"cookie_lifetime,omitempty"`
-	Certificates   *[]int  `json:"certificates,omitempty"`
-	RedirectHTTP   *bool   `json:"redirect_http,omitempty"`
-	StickySessions *bool   `json:"sticky_sessions,omitempty"`
+	CookieName     *string  `json:"cookie_name,omitempty"`
+	CookieLifetime *int     `json:"cookie_lifetime,omitempty"`
+	Certificates   *[]int64 `json:"certificates,omitempty"`
+	RedirectHTTP   *bool    `json:"redirect_http,omitempty"`
+	StickySessions *bool    `json:"sticky_sessions,omitempty"`
 }
 
 type LoadBalancerActionAddServiceRequestHealthCheck struct {
@@ -227,11 +213,11 @@ type LoadBalancerActionUpdateServiceRequest struct {
 }
 
 type LoadBalancerActionUpdateServiceRequestHTTP struct {
-	CookieName     *string `json:"cookie_name,omitempty"`
-	CookieLifetime *int    `json:"cookie_lifetime,omitempty"`
-	Certificates   *[]int  `json:"certificates,omitempty"`
-	RedirectHTTP   *bool   `json:"redirect_http,omitempty"`
-	StickySessions *bool   `json:"sticky_sessions,omitempty"`
+	CookieName     *string  `json:"cookie_name,omitempty"`
+	CookieLifetime *int     `json:"cookie_lifetime,omitempty"`
+	Certificates   *[]int64 `json:"certificates,omitempty"`
+	RedirectHTTP   *bool    `json:"redirect_http,omitempty"`
+	StickySessions *bool    `json:"sticky_sessions,omitempty"`
 }
 
 type LoadBalancerActionUpdateServiceRequestHealthCheck struct {
@@ -265,7 +251,7 @@ type LoadBalancerDeleteServiceResponse struct {
 
 type LoadBalancerCreateRequest struct {
 	Name             string                              `json:"name"`
-	LoadBalancerType interface{}                         `json:"load_balancer_type"` // int or string
+	LoadBalancerType IDOrName                            `json:"load_balancer_type"`
 	Algorithm        *LoadBalancerCreateRequestAlgorithm `json:"algorithm,omitempty"`
 	Location         *string                             `json:"location,omitempty"`
 	NetworkZone      *string                             `json:"network_zone,omitempty"`
@@ -273,7 +259,7 @@ type LoadBalancerCreateRequest struct {
 	Targets          []LoadBalancerCreateRequestTarget   `json:"targets,omitempty"`
 	Services         []LoadBalancerCreateRequestService  `json:"services,omitempty"`
 	PublicInterface  *bool                               `json:"public_interface,omitempty"`
-	Network          *int                                `json:"network,omitempty"`
+	Network          *int64                              `json:"network,omitempty"`
 }
 
 type LoadBalancerCreateRequestAlgorithm struct {
@@ -289,7 +275,7 @@ type LoadBalancerCreateRequestTarget struct {
 }
 
 type LoadBalancerCreateRequestTargetServer struct {
-	ID int `json:"id"`
+	ID int64 `json:"id"`
 }
 
 type LoadBalancerCreateRequestTargetLabelSelector struct {
@@ -310,11 +296,11 @@ type LoadBalancerCreateRequestService struct {
 }
 
 type LoadBalancerCreateRequestServiceHTTP struct {
-	CookieName     *string `json:"cookie_name,omitempty"`
-	CookieLifetime *int    `json:"cookie_lifetime,omitempty"`
-	Certificates   *[]int  `json:"certificates,omitempty"`
-	RedirectHTTP   *bool   `json:"redirect_http,omitempty"`
-	StickySessions *bool   `json:"sticky_sessions,omitempty"`
+	CookieName     *string  `json:"cookie_name,omitempty"`
+	CookieLifetime *int     `json:"cookie_lifetime,omitempty"`
+	Certificates   *[]int64 `json:"certificates,omitempty"`
+	RedirectHTTP   *bool    `json:"redirect_http,omitempty"`
+	StickySessions *bool    `json:"sticky_sessions,omitempty"`
 }
 
 type LoadBalancerCreateRequestServiceHealthCheck struct {
@@ -365,7 +351,7 @@ type LoadBalancerActionChangeAlgorithmResponse struct {
 }
 
 type LoadBalancerActionAttachToNetworkRequest struct {
-	Network int     `json:"network"`
+	Network int64   `json:"network"`
 	IP      *string `json:"ip,omitempty"`
 }
 
@@ -374,7 +360,7 @@ type LoadBalancerActionAttachToNetworkResponse struct {
 }
 
 type LoadBalancerActionDetachFromNetworkRequest struct {
-	Network int `json:"network"`
+	Network int64 `json:"network"`
 }
 
 type LoadBalancerActionDetachFromNetworkResponse struct {
@@ -394,9 +380,39 @@ type LoadBalancerActionDisablePublicInterfaceResponse struct {
 }
 
 type LoadBalancerActionChangeTypeRequest struct {
-	LoadBalancerType interface{} `json:"load_balancer_type"` // int or string
+	LoadBalancerType IDOrName `json:"load_balancer_type"`
 }
 
 type LoadBalancerActionChangeTypeResponse struct {
+	Action Action `json:"action"`
+}
+
+// LoadBalancerGetMetricsResponse defines the schema of the response when
+// requesting metrics for a Load Balancer.
+type LoadBalancerGetMetricsResponse struct {
+	Metrics struct {
+		Start      time.Time                             `json:"start"`
+		End        time.Time                             `json:"end"`
+		Step       float64                               `json:"step"`
+		TimeSeries map[string]LoadBalancerTimeSeriesVals `json:"time_series"`
+	} `json:"metrics"`
+}
+
+// LoadBalancerTimeSeriesVals contains the values for a Load Balancer time
+// series.
+type LoadBalancerTimeSeriesVals struct {
+	Values []interface{} `json:"values"`
+}
+
+// LoadBalancerActionChangeDNSPtrRequest defines the schema for the request to
+// change a Load Balancer reverse DNS pointer.
+type LoadBalancerActionChangeDNSPtrRequest struct {
+	IP     string  `json:"ip"`
+	DNSPtr *string `json:"dns_ptr"`
+}
+
+// LoadBalancerActionChangeDNSPtrResponse defines the schema of the response when
+// creating a change_dns_ptr Floating IP action.
+type LoadBalancerActionChangeDNSPtrResponse struct {
 	Action Action `json:"action"`
 }

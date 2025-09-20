@@ -21,15 +21,9 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	metrics_quality "k8s.io/autoscaler/vertical-pod-autoscaler/pkg/utils/metrics/quality"
 	"k8s.io/klog/v2"
-)
 
-const (
-	// OOMBumpUpRatio specifies how much memory will be added after observing OOM.
-	OOMBumpUpRatio float64 = 1.2
-	// OOMMinBumpUp specifies minimal increase of memory after observing OOM.
-	OOMMinBumpUp float64 = 100 * 1024 * 1024 // 100MB
+	metrics_quality "k8s.io/autoscaler/vertical-pod-autoscaler/pkg/utils/metrics/quality"
 )
 
 // ContainerUsageSample is a measure of resource usage of a container over some
@@ -39,8 +33,6 @@ type ContainerUsageSample struct {
 	MeasureStart time.Time
 	// Average CPU usage in cores or memory usage in bytes.
 	Usage ResourceAmount
-	// CPU or memory request at the time of measurment.
-	Request ResourceAmount
 	// Which resource is this sample for.
 	Resource ResourceName
 }
@@ -49,7 +41,8 @@ type ContainerUsageSample struct {
 // Each ContainerState has a pointer to the aggregation that is used for
 // aggregating its usage samples.
 // It holds the recent history of CPU and memory utilization.
-//   Note: samples are added to intervals based on their start timestamps.
+//
+//	Note: samples are added to intervals based on their start timestamps.
 type ContainerState struct {
 	// Current request.
 	Request Resources
@@ -121,7 +114,7 @@ func (container *ContainerState) observeQualityMetrics(usage ResourceAmount, isO
 	case corev1.ResourceMemory:
 		recommendationValue = float64(recommendation.Value())
 	default:
-		klog.Warningf("Unknown resource: %v", resource)
+		klog.V(0).InfoS("Unknown resource", "resource", resource)
 		return
 	}
 	metrics_quality.ObserveQualityMetrics(usageValue, recommendationValue, isOOM, resource, updateMode)
@@ -156,7 +149,6 @@ func (container *ContainerState) addMemorySample(sample *ContainerUsageSample, i
 			oldPeak := ContainerUsageSample{
 				MeasureStart: container.WindowEnd,
 				Usage:        oldMaxMem,
-				Request:      sample.Request,
 				Resource:     ResourceMemory,
 			}
 			container.aggregator.SubtractSample(&oldPeak)
@@ -165,7 +157,7 @@ func (container *ContainerState) addMemorySample(sample *ContainerUsageSample, i
 	} else {
 		// Shift the memory aggregation window to the next interval.
 		memoryAggregationInterval := GetAggregationsConfig().MemoryAggregationInterval
-		shift := truncate(ts.Sub(container.WindowEnd), memoryAggregationInterval) + memoryAggregationInterval
+		shift := ts.Sub(container.WindowEnd).Truncate(memoryAggregationInterval) + memoryAggregationInterval
 		container.WindowEnd = container.WindowEnd.Add(shift)
 		container.memoryPeak = 0
 		container.oomPeak = 0
@@ -176,7 +168,6 @@ func (container *ContainerState) addMemorySample(sample *ContainerUsageSample, i
 		newPeak := ContainerUsageSample{
 			MeasureStart: container.WindowEnd,
 			Usage:        sample.Usage,
-			Request:      sample.Request,
 			Resource:     ResourceMemory,
 		}
 		container.aggregator.AddSample(&newPeak)
@@ -198,8 +189,8 @@ func (container *ContainerState) RecordOOM(timestamp time.Time, requestedMemory 
 	// Get max of the request and the recent usage-based memory peak.
 	// Omitting oomPeak here to protect against recommendation running too high on subsequent OOMs.
 	memoryUsed := ResourceAmountMax(requestedMemory, container.memoryPeak)
-	memoryNeeded := ResourceAmountMax(memoryUsed+MemoryAmountFromBytes(OOMMinBumpUp),
-		ScaleResource(memoryUsed, OOMBumpUpRatio))
+	memoryNeeded := ResourceAmountMax(memoryUsed+MemoryAmountFromBytes(GetAggregationsConfig().OOMMinBumpUp),
+		ScaleResource(memoryUsed, GetAggregationsConfig().OOMBumpUpRatio))
 
 	oomMemorySample := ContainerUsageSample{
 		MeasureStart: timestamp,
@@ -228,15 +219,4 @@ func (container *ContainerState) AddSample(sample *ContainerUsageSample) bool {
 	default:
 		return false
 	}
-}
-
-// Truncate returns the result of rounding d toward zero to a multiple of m.
-// If m <= 0, Truncate returns d unchanged.
-// This helper function is introduced to support older implementations of the
-// time package that don't provide Duration.Truncate function.
-func truncate(d, m time.Duration) time.Duration {
-	if m <= 0 {
-		return d
-	}
-	return d - d%m
 }

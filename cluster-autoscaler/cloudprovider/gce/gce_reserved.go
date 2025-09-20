@@ -72,6 +72,8 @@ const (
 	lowMemoryOffset = 8 * MiB
 	// lowMemoryThreshold is the threshold to apply lowMemoryOffset
 	lowMemoryThreshold = 8 * GiB
+	// architectureOffsetRatio is the offset value used for arm architecture
+	architectureOffsetRatio = 0.9971
 )
 
 // EvictionHard is the struct used to keep parsed values for eviction
@@ -85,7 +87,10 @@ type GceReserved struct{}
 
 // CalculateKernelReserved computes how much memory Linux kernel will reserve.
 // TODO(jkaniuk): account for crashkernel reservation on RHEL / CentOS
-func (r *GceReserved) CalculateKernelReserved(physicalMemory int64, os OperatingSystem, osDistribution OperatingSystemDistribution, nodeVersion string) int64 {
+func (r *GceReserved) CalculateKernelReserved(m MigOsInfo, physicalMemory int64) int64 {
+	os := m.Os()
+	osDistribution := m.OsDistribution()
+	arch := m.Arch()
 	switch os {
 	case OperatingSystemLinux:
 		// Account for memory reserved by kernel
@@ -95,19 +100,22 @@ func (r *GceReserved) CalculateKernelReserved(physicalMemory int64, os Operating
 		if physicalMemory > swiotlbThresholdMemory {
 			reserved += swiotlbReservedMemory
 		}
+		if physicalMemory <= lowMemoryThreshold {
+			reserved += lowMemoryOffset
+		}
 
 		// Additional reserved memory to correct estimation
 		// The reason for this value is we detected additional reservation, but we were
 		// unable to find the root cause. Hence, we added a best estimated formula that was
 		// statistically developed.
-		if osDistribution == OperatingSystemDistributionCOS || osDistribution == OperatingSystemDistributionCOSContainerd {
+		if osDistribution == OperatingSystemDistributionCOS {
 			reserved += int64(math.Min(correctionConstant*float64(physicalMemory), maximumCorrectionValue))
-		} else if osDistribution == OperatingSystemDistributionUbuntu || osDistribution == OperatingSystemDistributionUbuntuContainerd {
+			if arch == Arm64 {
+				reserved = int64(math.Round(float64(reserved) * architectureOffsetRatio))
+			}
+		} else if osDistribution == OperatingSystemDistributionUbuntu {
 			reserved += int64(math.Min(correctionConstant*float64(physicalMemory), maximumCorrectionValue))
 			reserved += ubuntuSpecificOffset
-		}
-		if physicalMemory <= lowMemoryThreshold {
-			reserved += lowMemoryOffset
 		}
 
 		return reserved
@@ -253,17 +261,7 @@ func EphemeralStorageOnLocalSSDFilesystemOverheadInBytes(diskCount int64, osDist
 		measuredCount = 24 // max attachable
 	}
 
-	// the container runtime doesn't affect filesystem overhead
-	var measuredOS OperatingSystemDistribution
-	if osDistribution == OperatingSystemDistributionCOSContainerd {
-		measuredOS = OperatingSystemDistributionCOS
-	} else if osDistribution == OperatingSystemDistributionUbuntuContainerd {
-		measuredOS = OperatingSystemDistributionUbuntu
-	} else {
-		measuredOS = osDistribution
-	}
-
-	o, ok := ephemeralStorageOnLocalSSDFilesystemOverheadInKiBByOSAndDiskCount[measuredOS]
+	o, ok := ephemeralStorageOnLocalSSDFilesystemOverheadInKiBByOSAndDiskCount[osDistribution]
 	if !ok {
 		klog.Errorf("Ephemeral storage backed by local SSDs is not supported for image family %v", osDistribution)
 		return 0
@@ -272,13 +270,18 @@ func EphemeralStorageOnLocalSSDFilesystemOverheadInBytes(diskCount int64, osDist
 }
 
 // CalculateOSReservedEphemeralStorage estimates how much ephemeral storage OS will reserve and eviction threshold
-func (r *GceReserved) CalculateOSReservedEphemeralStorage(diskSize int64, os OperatingSystem, osDistribution OperatingSystemDistribution, nodeVersion string) int64 {
+func (r *GceReserved) CalculateOSReservedEphemeralStorage(m MigOsInfo, diskSize int64) int64 {
+	osDistribution := m.OsDistribution()
+	arch := m.Arch()
 	switch osDistribution {
-	case OperatingSystemDistributionCOS, OperatingSystemDistributionCOSContainerd:
+	case OperatingSystemDistributionCOS:
 		storage := int64(math.Ceil(0.015635*float64(diskSize))) + int64(math.Ceil(4.148*GiB)) // os partition estimation
 		storage += int64(math.Min(100*MiB, math.Ceil(0.001*float64(diskSize))))               // over-provisioning buffer
+		if arch == Arm64 {
+			storage += 65536 * KiB
+		}
 		return storage
-	case OperatingSystemDistributionUbuntu, OperatingSystemDistributionUbuntuContainerd:
+	case OperatingSystemDistributionUbuntu:
 		storage := int64(math.Ceil(0.03083*float64(diskSize))) + int64(math.Ceil(0.171*GiB)) // os partition estimation
 		storage += int64(math.Min(100*MiB, math.Ceil(0.001*float64(diskSize))))              // over-provisioning buffer
 		return storage
@@ -290,4 +293,31 @@ func (r *GceReserved) CalculateOSReservedEphemeralStorage(diskSize int64, os Ope
 		klog.Errorf("CalculateReservedAndEvictionEphemeralStorage called for unknown os distribution %v", osDistribution)
 		return 0
 	}
+}
+
+// GceMigOsInfo contains os details of nodes in gce mig.
+type GceMigOsInfo struct {
+	os             OperatingSystem
+	osDistribution OperatingSystemDistribution
+	arch           SystemArchitecture
+}
+
+// Os return operating system.
+func (m *GceMigOsInfo) Os() OperatingSystem {
+	return m.os
+}
+
+// OsDistribution return operating system distribution.
+func (m *GceMigOsInfo) OsDistribution() OperatingSystemDistribution {
+	return m.osDistribution
+}
+
+// Arch return system architecture.
+func (m *GceMigOsInfo) Arch() SystemArchitecture {
+	return m.arch
+}
+
+// NewMigOsInfo return gce implementation of MigOsInfo interface.
+func NewMigOsInfo(os OperatingSystem, osDistribution OperatingSystemDistribution, arch SystemArchitecture) MigOsInfo {
+	return &GceMigOsInfo{os, osDistribution, arch}
 }

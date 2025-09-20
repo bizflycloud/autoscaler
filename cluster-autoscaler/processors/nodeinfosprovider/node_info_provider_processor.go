@@ -17,24 +17,26 @@ limitations under the License.
 package nodeinfosprovider
 
 import (
+	"time"
+
 	appsv1 "k8s.io/api/apps/v1"
 	apiv1 "k8s.io/api/core/v1"
 
 	"k8s.io/autoscaler/cluster-autoscaler/context"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
 	"k8s.io/autoscaler/cluster-autoscaler/utils/errors"
 	"k8s.io/autoscaler/cluster-autoscaler/utils/taints"
-	schedulerframework "k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
 // TemplateNodeInfoProvider is provides the initial nodeInfos set.
 type TemplateNodeInfoProvider interface {
 	// Process returns a map of nodeInfos for node groups.
-	Process(ctx *context.AutoscalingContext, nodes []*apiv1.Node, daemonsets []*appsv1.DaemonSet, ignoredTaints taints.TaintKeySet) (map[string]*schedulerframework.NodeInfo, errors.AutoscalerError)
+	Process(ctx *context.AutoscalingContext, nodes []*apiv1.Node, daemonsets []*appsv1.DaemonSet, taintConfig taints.TaintConfig, currentTime time.Time) (map[string]*framework.NodeInfo, errors.AutoscalerError)
 	// CleanUp cleans up processor's internal structures.
 	CleanUp()
 }
 
 // NewDefaultTemplateNodeInfoProvider returns a default TemplateNodeInfoProvider.
-func NewDefaultTemplateNodeInfoProvider() TemplateNodeInfoProvider {
-	return NewMixedTemplateNodeInfoProvider()
+func NewDefaultTemplateNodeInfoProvider(time *time.Duration, forceDaemonSets bool) TemplateNodeInfoProvider {
+	return NewMixedTemplateNodeInfoProvider(time, forceDaemonSets)
 }

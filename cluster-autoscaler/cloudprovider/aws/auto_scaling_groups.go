@@ -23,22 +23,25 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/aws/aws-sdk-go/aws"
+	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/aws/aws-sdk-go/service/autoscaling"
+	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/aws/aws-sdk-go/service/ec2"
 	"k8s.io/autoscaler/cluster-autoscaler/config/dynamic"
-
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/autoscaling"
 	klog "k8s.io/klog/v2"
 )
 
 const (
-	scaleToZeroSupported          = true
-	placeholderInstanceNamePrefix = "i-placeholder"
+	scaleToZeroSupported           = true
+	placeholderInstanceNamePrefix  = "i-placeholder"
+	placeholderUnfulfillableStatus = "placeholder-cannot-be-fulfilled"
 )
 
 type asgCache struct {
-	registeredAsgs       []*asg
+	registeredAsgs       map[AwsRef]*asg
 	asgToInstances       map[AwsRef][]AwsInstanceRef
 	instanceToAsg        map[AwsInstanceRef]*asg
+	instanceStatus       map[AwsInstanceRef]*string
+	instanceLifecycle    map[AwsInstanceRef]*string
 	asgInstanceTypeCache *instanceTypeExpirationStore
 	mutex                sync.Mutex
 	awsService           *awsWrapper
@@ -55,16 +58,19 @@ type launchTemplate struct {
 }
 
 type mixedInstancesPolicy struct {
-	launchTemplate         *launchTemplate
-	instanceTypesOverrides []string
+	launchTemplate                *launchTemplate
+	instanceTypesOverrides        []string
+	instanceRequirementsOverrides *autoscaling.InstanceRequirements
+	instanceRequirements          *ec2.InstanceRequirements
 }
 
 type asg struct {
 	AwsRef
 
-	minSize int
-	maxSize int
-	curSize int
+	minSize        int
+	maxSize        int
+	curSize        int
+	lastUpdateTime time.Time
 
 	AvailabilityZones       []string
 	LaunchConfigurationName string
@@ -75,10 +81,12 @@ type asg struct {
 
 func newASGCache(awsService *awsWrapper, explicitSpecs []string, autoDiscoverySpecs []asgAutoDiscoveryConfig) (*asgCache, error) {
 	registry := &asgCache{
-		registeredAsgs:        make([]*asg, 0),
+		registeredAsgs:        make(map[AwsRef]*asg, 0),
 		awsService:            awsService,
 		asgToInstances:        make(map[AwsRef][]AwsInstanceRef),
 		instanceToAsg:         make(map[AwsInstanceRef]*asg),
+		instanceStatus:        make(map[AwsInstanceRef]*string),
+		instanceLifecycle:     make(map[AwsInstanceRef]*string),
 		asgInstanceTypeCache:  newAsgInstanceTypeCache(awsService),
 		interrupt:             make(chan struct{}),
 		asgAutoDiscoverySpecs: autoDiscoverySpecs,
@@ -97,8 +105,15 @@ func newASGCache(awsService *awsWrapper, explicitSpecs []string, autoDiscoverySp
 var getInstanceTypeForAsg = func(m *asgCache, group *asg) (string, error) {
 	if obj, found, _ := m.asgInstanceTypeCache.GetByKey(group.AwsRef.Name); found {
 		return obj.(instanceTypeCachedObject).instanceType, nil
-	} else if result, err := m.awsService.getInstanceTypesForAsgs([]*asg{group}); err == nil {
-		return result[group.AwsRef.Name], nil
+	}
+
+	result, err := m.awsService.getInstanceTypesForAsgs([]*asg{group})
+	if err != nil {
+		return "", fmt.Errorf("could not get instance type for %s: %w", group.AwsRef.Name, err)
+	}
+
+	if instanceType, ok := result[group.AwsRef.Name]; ok {
+		return instanceType, nil
 	}
 
 	return "", fmt.Errorf("could not find instance type for %s", group.AwsRef.Name)
@@ -121,53 +136,44 @@ func (m *asgCache) parseExplicitAsgs(specs []string) error {
 
 // Register ASG. Returns the registered ASG.
 func (m *asgCache) register(asg *asg) *asg {
-	for i := range m.registeredAsgs {
-		if existing := m.registeredAsgs[i]; existing.AwsRef == asg.AwsRef {
-			if reflect.DeepEqual(existing, asg) {
-				return existing
-			}
-
-			klog.V(4).Infof("Updating ASG %s", asg.AwsRef.Name)
-
-			// Explicit registered groups should always use the manually provided min/max
-			// values and the not the ones returned by the API
-			if !m.explicitlyConfigured[asg.AwsRef] {
-				existing.minSize = asg.minSize
-				existing.maxSize = asg.maxSize
-			}
-
-			existing.curSize = asg.curSize
-
-			// Those information are mainly required to create templates when scaling
-			// from zero
-			existing.AvailabilityZones = asg.AvailabilityZones
-			existing.LaunchConfigurationName = asg.LaunchConfigurationName
-			existing.LaunchTemplate = asg.LaunchTemplate
-			existing.MixedInstancesPolicy = asg.MixedInstancesPolicy
-			existing.Tags = asg.Tags
-
+	if existing, asgExists := m.registeredAsgs[asg.AwsRef]; asgExists {
+		if reflect.DeepEqual(existing, asg) {
 			return existing
 		}
+
+		// Explicit registered groups should always use the manually provided min/max
+		// values and the not the ones returned by the API
+		if !m.explicitlyConfigured[asg.AwsRef] {
+			existing.minSize = asg.minSize
+			existing.maxSize = asg.maxSize
+		}
+
+		existing.curSize = asg.curSize
+
+		// Those information are mainly required to create templates when scaling
+		// from zero
+		existing.AvailabilityZones = asg.AvailabilityZones
+		existing.LaunchConfigurationName = asg.LaunchConfigurationName
+		existing.LaunchTemplate = asg.LaunchTemplate
+		existing.MixedInstancesPolicy = asg.MixedInstancesPolicy
+		existing.Tags = asg.Tags
+
+		klog.V(4).Infof("Updated ASG cache for %s. min/max/current is %d/%d/%d", asg.AwsRef.Name, existing.minSize, existing.maxSize, existing.curSize)
+
+		return existing
 	}
 	klog.V(1).Infof("Registering ASG %s", asg.AwsRef.Name)
-	m.registeredAsgs = append(m.registeredAsgs, asg)
+	m.registeredAsgs[asg.AwsRef] = asg
 	return asg
 }
 
 // Unregister ASG. Returns the unregistered ASG.
 func (m *asgCache) unregister(a *asg) *asg {
-	updated := make([]*asg, 0, len(m.registeredAsgs))
-	var changed *asg
-	for _, existing := range m.registeredAsgs {
-		if existing.AwsRef == a.AwsRef {
-			klog.V(1).Infof("Unregistered ASG %s", a.AwsRef.Name)
-			changed = a
-			continue
-		}
-		updated = append(updated, existing)
+	if _, asgExists := m.registeredAsgs[a.AwsRef]; asgExists {
+		klog.V(1).Infof("Unregistered ASG %s", a.AwsRef.Name)
+		delete(m.registeredAsgs, a.AwsRef)
 	}
-	m.registeredAsgs = updated
-	return changed
+	return a
 }
 
 func (m *asgCache) buildAsgFromSpec(spec string) (*asg, error) {
@@ -184,7 +190,7 @@ func (m *asgCache) buildAsgFromSpec(spec string) (*asg, error) {
 }
 
 // Get returns the currently registered ASGs
-func (m *asgCache) Get() []*asg {
+func (m *asgCache) Get() map[AwsRef]*asg {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
@@ -226,6 +232,25 @@ func (m *asgCache) InstancesByAsg(ref AwsRef) ([]AwsInstanceRef, error) {
 	return nil, fmt.Errorf("error while looking for instances of ASG: %s", ref)
 }
 
+func (m *asgCache) InstanceStatus(ref AwsInstanceRef) (*string, error) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if status, found := m.instanceStatus[ref]; found {
+		return status, nil
+	}
+
+	return nil, fmt.Errorf("could not find instance %v", ref)
+}
+
+func (m *asgCache) findInstanceLifecycle(ref AwsInstanceRef) (*string, error) {
+	if lifecycle, found := m.instanceLifecycle[ref]; found {
+		return lifecycle, nil
+	}
+
+	return nil, fmt.Errorf("could not find instance %v", ref)
+}
+
 func (m *asgCache) SetAsgSize(asg *asg, size int) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
@@ -248,6 +273,7 @@ func (m *asgCache) setAsgSizeNoLock(asg *asg, size int) error {
 	}
 
 	// Proactively set the ASG size so autoscaler makes better decisions
+	asg.lastUpdateTime = start
 	asg.curSize = size
 
 	return nil
@@ -278,34 +304,82 @@ func (m *asgCache) DeleteInstances(instances []*AwsInstanceRef) error {
 			for i, instance := range instances {
 				instanceIds[i] = instance.Name
 			}
-
 			return fmt.Errorf("can't delete instances %s as they belong to at least two different ASGs (%s and %s)", strings.Join(instanceIds, ","), commonAsg.Name, asg.Name)
 		}
 	}
 
-	for _, instance := range instances {
-		// check if the instance is a placeholder - a requested instance that was never created by the node group
-		// if it is, just decrease the size of the node group, as there's no specific instance we can remove
-		if m.isPlaceholderInstance(instance) {
-			klog.V(4).Infof("instance %s is detected as a placeholder, decreasing ASG requested size instead "+
-				"of deleting instance", instance.Name)
-			m.decreaseAsgSizeByOneNoLock(commonAsg)
-		} else {
-			params := &autoscaling.TerminateInstanceInAutoScalingGroupInput{
-				InstanceId:                     aws.String(instance.Name),
-				ShouldDecrementDesiredCapacity: aws.Bool(true),
-			}
-			start := time.Now()
-			resp, err := m.awsService.TerminateInstanceInAutoScalingGroup(params)
-			observeAWSRequest("TerminateInstanceInAutoScalingGroup", err, start)
-			if err != nil {
-				return err
-			}
-			klog.V(4).Infof(*resp.Activity.Description)
+	placeHolderInstancesCount := m.GetPlaceHolderInstancesCount(instances)
+	// Check if there are any placeholder instances in the list.
+	if placeHolderInstancesCount > 0 {
+		// Log the check for placeholders in the ASG.
+		klog.V(4).Infof("Detected %d placeholder instance(s) in ASG %s",
+			placeHolderInstancesCount, commonAsg.Name)
 
-			// Proactively decrement the size so autoscaler makes better decisions
-			commonAsg.curSize--
+		asgNames := []string{commonAsg.Name}
+		asgDetail, err := m.awsService.getAutoscalingGroupsByNames(asgNames)
+
+		if err != nil {
+			klog.Errorf("Error retrieving ASG details %s: %v", commonAsg.Name, err)
+			return err
 		}
+
+		activeInstancesInAsg := len(asgDetail[0].Instances)
+		desiredCapacityInAsg := int(*asgDetail[0].DesiredCapacity)
+		klog.V(4).Infof("asg %s has placeholders instances with desired capacity = %d and active instances = %d. updating ASG to match active instances count",
+			commonAsg.Name, desiredCapacityInAsg, activeInstancesInAsg)
+
+		// If the difference between the active instances and the desired capacity is greater than 1,
+		// it means that the ASG is under-provisioned and the desired capacity is not being reached.
+		// In this case, we would reduce the size of ASG by the count of unprovisioned instances
+		// which is equal to the total count of active instances in ASG
+
+		err = m.setAsgSizeNoLock(commonAsg, activeInstancesInAsg)
+
+		if err != nil {
+			klog.Errorf("Error reducing ASG %s size to %d: %v", commonAsg.Name, activeInstancesInAsg, err)
+			return err
+		}
+	}
+
+	for _, instance := range instances {
+
+		if m.isPlaceholderInstance(instance) {
+			// skipping placeholder as placeholder instances don't exist
+			// and we have already reduced ASG size during placeholder check.
+			continue
+		}
+		// check if the instance is already terminating - if it is, don't bother terminating again
+		// as doing so causes unnecessary API calls and can cause the curSize cached value to decrement
+		// unnecessarily.
+		lifecycle, err := m.findInstanceLifecycle(*instance)
+		if err != nil {
+			return err
+		}
+
+		if lifecycle != nil &&
+			*lifecycle == autoscaling.LifecycleStateTerminated ||
+			*lifecycle == autoscaling.LifecycleStateTerminating ||
+			*lifecycle == autoscaling.LifecycleStateTerminatingWait ||
+			*lifecycle == autoscaling.LifecycleStateTerminatingProceed {
+			klog.V(2).Infof("instance %s is already terminating in state %s, will skip instead", instance.Name, *lifecycle)
+			continue
+		}
+
+		params := &autoscaling.TerminateInstanceInAutoScalingGroupInput{
+			InstanceId:                     aws.String(instance.Name),
+			ShouldDecrementDesiredCapacity: aws.Bool(true),
+		}
+		start := time.Now()
+		resp, err := m.awsService.TerminateInstanceInAutoScalingGroup(params)
+		observeAWSRequest("TerminateInstanceInAutoScalingGroup", err, start)
+		if err != nil {
+			return err
+		}
+		klog.V(4).Infof(*resp.Activity.Description)
+
+		// Proactively decrement the size so autoscaler makes better decisions
+		commonAsg.curSize--
+
 	}
 	return nil
 }
@@ -317,23 +391,18 @@ func (m *asgCache) isPlaceholderInstance(instance *AwsInstanceRef) bool {
 
 // Fetch automatically discovered ASGs. These ASGs should be unregistered if
 // they no longer exist in AWS.
-func (m *asgCache) fetchAutoAsgNames() ([]string, error) {
-	groupNames := make([]string, 0)
-
+func (m *asgCache) buildAsgTags() map[string]string {
+	groupTags := map[string]string{}
 	for _, spec := range m.asgAutoDiscoverySpecs {
-		names, err := m.awsService.getAutoscalingGroupNamesByTags(spec.Tags)
-		if err != nil {
-			return nil, fmt.Errorf("cannot autodiscover ASGs: %s", err)
+		for k, v := range spec.Tags {
+			groupTags[k] = v
 		}
-
-		groupNames = append(groupNames, names...)
 	}
 
-	return groupNames, nil
+	return groupTags
 }
 
-func (m *asgCache) buildAsgNames() ([]string, error) {
-	// Collect explicitly specified names
+func (m *asgCache) buildAsgNames() []string {
 	refreshNames := make([]string, len(m.explicitlyConfigured))
 	i := 0
 	for k := range m.explicitlyConfigured {
@@ -341,23 +410,7 @@ func (m *asgCache) buildAsgNames() ([]string, error) {
 		i++
 	}
 
-	// Append auto-discovered names
-	autoDiscoveredNames, err := m.fetchAutoAsgNames()
-	if err != nil {
-		return nil, err
-	}
-	for _, name := range autoDiscoveredNames {
-		autoRef := AwsRef{Name: name}
-
-		if m.explicitlyConfigured[autoRef] {
-			// This ASG was already explicitly configured, we only need to fetch it once
-			continue
-		}
-
-		refreshNames = append(refreshNames, name)
-	}
-
-	return refreshNames, nil
+	return refreshNames
 }
 
 // regenerate the cached view of explicitly configured and auto-discovered ASGs
@@ -367,19 +420,25 @@ func (m *asgCache) regenerate() error {
 
 	newInstanceToAsgCache := make(map[AwsInstanceRef]*asg)
 	newAsgToInstancesCache := make(map[AwsRef][]AwsInstanceRef)
-
-	// Build list of known ASG names
-	refreshNames, err := m.buildAsgNames()
-	if err != nil {
-		return err
-	}
+	newInstanceStatusMap := make(map[AwsInstanceRef]*string)
+	newInstanceLifecycleMap := make(map[AwsInstanceRef]*string)
 
 	// Fetch details of all ASGs
-	klog.V(4).Infof("Regenerating instance to ASG map for ASGs: %v", refreshNames)
-	groups, err := m.awsService.getAutoscalingGroupsByNames(refreshNames)
+	refreshNames := m.buildAsgNames()
+	klog.V(4).Infof("Regenerating instance to ASG map for ASG names: %v", refreshNames)
+	namedGroups, err := m.awsService.getAutoscalingGroupsByNames(refreshNames)
 	if err != nil {
 		return err
 	}
+
+	refreshTags := m.buildAsgTags()
+	klog.V(4).Infof("Regenerating instance to ASG map for ASG tags: %v", refreshTags)
+	taggedGroups, err := m.awsService.getAutoscalingGroupsByTags(refreshTags)
+	if err != nil {
+		return err
+	}
+
+	groups := append(namedGroups, taggedGroups...)
 
 	// If currently any ASG has more Desired than running Instances, introduce placeholders
 	// for the instances to come up. This is required to track Desired instances that
@@ -403,6 +462,8 @@ func (m *asgCache) regenerate() error {
 			ref := m.buildInstanceRefFromAWS(instance)
 			newInstanceToAsgCache[ref] = asg
 			newAsgToInstancesCache[asg.AwsRef][i] = ref
+			newInstanceStatusMap[ref] = instance.HealthStatus
+			newInstanceLifecycleMap[ref] = instance.LifecycleState
 		}
 	}
 
@@ -431,6 +492,8 @@ func (m *asgCache) regenerate() error {
 	m.asgToInstances = newAsgToInstancesCache
 	m.instanceToAsg = newInstanceToAsgCache
 	m.autoscalingOptions = newAutoscalingOptions
+	m.instanceStatus = newInstanceStatusMap
+	m.instanceLifecycle = newInstanceLifecycleMap
 	return nil
 }
 
@@ -444,15 +507,55 @@ func (m *asgCache) createPlaceholdersForDesiredNonStartedInstances(groups []*aut
 
 		klog.V(4).Infof("Instance group %s has only %d instances created while requested count is %d. "+
 			"Creating placeholder instances.", *g.AutoScalingGroupName, realInstances, desired)
+
+		healthStatus := ""
+		isAvailable, err := m.isNodeGroupAvailable(g)
+		if err != nil {
+			klog.V(4).Infof("Could not check instance availability, creating placeholder node anyways: %v", err)
+		} else if !isAvailable {
+			klog.Warningf("Instance group %s cannot provision any more nodes!", *g.AutoScalingGroupName)
+			healthStatus = placeholderUnfulfillableStatus
+		}
+
 		for i := realInstances; i < desired; i++ {
 			id := fmt.Sprintf("%s-%s-%d", placeholderInstanceNamePrefix, *g.AutoScalingGroupName, i)
 			g.Instances = append(g.Instances, &autoscaling.Instance{
 				InstanceId:       &id,
 				AvailabilityZone: g.AvailabilityZones[0],
+				HealthStatus:     &healthStatus,
 			})
 		}
 	}
 	return groups
+}
+
+func (m *asgCache) isNodeGroupAvailable(group *autoscaling.Group) (bool, error) {
+	input := &autoscaling.DescribeScalingActivitiesInput{
+		AutoScalingGroupName: group.AutoScalingGroupName,
+	}
+
+	start := time.Now()
+	response, err := m.awsService.DescribeScalingActivities(input)
+	observeAWSRequest("DescribeScalingActivities", err, start)
+	if err != nil {
+		return true, err // If we can't describe the scaling activities we assume the node group is available
+	}
+
+	for _, activity := range response.Activities {
+		asgRef := AwsRef{Name: *group.AutoScalingGroupName}
+		if a, ok := m.registeredAsgs[asgRef]; ok {
+			lut := a.lastUpdateTime
+			if activity.StartTime.Before(lut) {
+				break
+			} else if *activity.StatusCode == "Failed" {
+				klog.Warningf("ASG %s scaling failed with %s", asgRef.Name, *activity)
+				return false, nil
+			}
+		} else {
+			klog.V(4).Infof("asg %v is not registered yet, skipping DescribeScalingActivities check", asgRef.Name)
+		}
+	}
+	return true, nil
 }
 
 func (m *asgCache) buildAsgFromAWS(g *autoscaling.Group) (*asg, error) {
@@ -483,21 +586,64 @@ func (m *asgCache) buildAsgFromAWS(g *autoscaling.Group) (*asg, error) {
 	}
 
 	if g.MixedInstancesPolicy != nil {
-		getInstanceTypes := func(data []*autoscaling.LaunchTemplateOverrides) []string {
-			res := make([]string, len(data))
-			for i := 0; i < len(data); i++ {
-				res[i] = aws.StringValue(data[i].InstanceType)
+		getInstanceTypes := func(overrides []*autoscaling.LaunchTemplateOverrides) []string {
+			res := []string{}
+			for _, override := range overrides {
+				if override.InstanceType != nil {
+					res = append(res, *override.InstanceType)
+				}
 			}
 			return res
 		}
 
+		getInstanceTypeRequirements := func(overrides []*autoscaling.LaunchTemplateOverrides) *autoscaling.InstanceRequirements {
+			if len(overrides) == 1 && overrides[0].InstanceRequirements != nil {
+				return overrides[0].InstanceRequirements
+			}
+			return nil
+		}
+
 		asg.MixedInstancesPolicy = &mixedInstancesPolicy{
-			launchTemplate:         buildLaunchTemplateFromSpec(g.MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification),
-			instanceTypesOverrides: getInstanceTypes(g.MixedInstancesPolicy.LaunchTemplate.Overrides),
+			launchTemplate:                buildLaunchTemplateFromSpec(g.MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification),
+			instanceTypesOverrides:        getInstanceTypes(g.MixedInstancesPolicy.LaunchTemplate.Overrides),
+			instanceRequirementsOverrides: getInstanceTypeRequirements(g.MixedInstancesPolicy.LaunchTemplate.Overrides),
+		}
+
+		if len(asg.MixedInstancesPolicy.instanceTypesOverrides) == 0 {
+			instanceRequirements, err := m.getInstanceRequirementsFromMixedInstancesPolicy(asg.MixedInstancesPolicy)
+			if err != nil {
+				return nil, fmt.Errorf("unable to retrieve instance requirements from mixed instance policy, err: %v", err)
+			}
+			asg.MixedInstancesPolicy.instanceRequirements = instanceRequirements
+		}
+
+		if len(asg.MixedInstancesPolicy.instanceTypesOverrides) != 0 && asg.MixedInstancesPolicy.instanceRequirementsOverrides != nil {
+			return nil, fmt.Errorf("invalid setup of both instance type and instance requirements overrides configured")
 		}
 	}
 
 	return asg, nil
+}
+
+func (m *asgCache) getInstanceRequirementsFromMixedInstancesPolicy(policy *mixedInstancesPolicy) (*ec2.InstanceRequirements, error) {
+	instanceRequirements := &ec2.InstanceRequirements{}
+	if policy.instanceRequirementsOverrides != nil {
+		var err error
+		instanceRequirements, err = m.awsService.getEC2RequirementsFromAutoscaling(policy.instanceRequirementsOverrides)
+		if err != nil {
+			return nil, err
+		}
+	} else if policy.launchTemplate != nil {
+		templateData, err := m.awsService.getLaunchTemplateData(policy.launchTemplate.name, policy.launchTemplate.version)
+		if err != nil {
+			return nil, err
+		}
+
+		if templateData.InstanceRequirements != nil {
+			instanceRequirements = templateData.InstanceRequirements
+		}
+	}
+	return instanceRequirements, nil
 }
 
 func (m *asgCache) buildInstanceRefFromAWS(instance *autoscaling.Instance) AwsInstanceRef {
@@ -511,4 +657,17 @@ func (m *asgCache) buildInstanceRefFromAWS(instance *autoscaling.Instance) AwsIn
 // Cleanup closes the channel to signal the go routine to stop that is handling the cache
 func (m *asgCache) Cleanup() {
 	close(m.interrupt)
+}
+
+// GetPlaceHolderInstancesCount returns count of placeholder instances in the cache
+func (m *asgCache) GetPlaceHolderInstancesCount(instances []*AwsInstanceRef) int {
+
+	placeholderInstancesCount := 0
+	for _, instance := range instances {
+		if strings.HasPrefix(instance.Name, placeholderInstanceNamePrefix) {
+			placeholderInstancesCount++
+
+		}
+	}
+	return placeholderInstancesCount
 }

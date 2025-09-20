@@ -20,6 +20,7 @@ import (
 	"time"
 
 	apiv1 "k8s.io/api/core/v1"
+	"k8s.io/autoscaler/cluster-autoscaler/clusterstate/api"
 	"k8s.io/autoscaler/cluster-autoscaler/clusterstate/utils"
 	"k8s.io/autoscaler/cluster-autoscaler/context"
 	"k8s.io/autoscaler/cluster-autoscaler/metrics"
@@ -65,13 +66,13 @@ func (e *EmptyClusterProcessor) ShouldAbort(context *context.AutoscalingContext,
 
 // OnEmptyCluster runs actions if the cluster is empty
 func OnEmptyCluster(context *context.AutoscalingContext, status string, emitEvent bool) {
-	klog.Warningf(status)
+	klog.Warning(status)
 	context.ProcessorCallbacks.ResetUnneededNodes()
 	// updates metrics related to empty cluster's state.
 	metrics.UpdateClusterSafeToAutoscale(false)
 	metrics.UpdateNodesCount(0, 0, 0, 0, 0)
 	if context.WriteStatusConfigMap {
-		utils.WriteStatusConfigMap(context.ClientSet, context.ConfigNamespace, status, context.LogRecorder, context.StatusConfigMapName)
+		utils.WriteStatusConfigMap(context.ClientSet, context.ConfigNamespace, api.ClusterAutoscalerStatus{AutoscalerStatus: api.ClusterAutoscalerInitializing, Message: status}, context.LogRecorder, context.StatusConfigMapName, time.Now())
 	}
 	if emitEvent {
 		context.LogRecorder.Eventf(apiv1.EventTypeWarning, "ClusterUnhealthy", status)

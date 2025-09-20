@@ -21,14 +21,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	apiv1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	vpa_types "k8s.io/autoscaler/vertical-pod-autoscaler/pkg/apis/autoscaling.k8s.io/v1"
 	"k8s.io/autoscaler/vertical-pod-autoscaler/pkg/utils/annotations"
 	"k8s.io/autoscaler/vertical-pod-autoscaler/pkg/utils/test"
-
-	apiv1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	"github.com/stretchr/testify/assert"
 )
 
 const (
@@ -37,10 +37,10 @@ const (
 
 // TODO(bskiba): Refactor the SortPriority tests as a testcase list test.
 func TestSortPriority(t *testing.T) {
-	pod1 := test.Pod().WithName("POD1").AddContainer(test.BuildTestContainer(containerName, "2", "")).Get()
-	pod2 := test.Pod().WithName("POD2").AddContainer(test.BuildTestContainer(containerName, "4", "")).Get()
-	pod3 := test.Pod().WithName("POD3").AddContainer(test.BuildTestContainer(containerName, "1", "")).Get()
-	pod4 := test.Pod().WithName("POD4").AddContainer(test.BuildTestContainer(containerName, "3", "")).Get()
+	pod1 := test.Pod().WithName("POD1").AddContainer(test.Container().WithName(containerName).WithCPURequest(resource.MustParse("2")).Get()).Get()
+	pod2 := test.Pod().WithName("POD2").AddContainer(test.Container().WithName(containerName).WithCPURequest(resource.MustParse("4")).Get()).Get()
+	pod3 := test.Pod().WithName("POD3").AddContainer(test.Container().WithName(containerName).WithCPURequest(resource.MustParse("1")).Get()).Get()
+	pod4 := test.Pod().WithName("POD4").AddContainer(test.Container().WithName(containerName).WithCPURequest(resource.MustParse("3")).Get()).Get()
 
 	vpa := test.VerticalPodAutoscaler().WithContainer(containerName).WithTarget("10", "").Get()
 
@@ -52,7 +52,7 @@ func TestSortPriority(t *testing.T) {
 	})
 	calculator := NewUpdatePriorityCalculator(vpa, nil, &test.FakeRecommendationProcessor{}, priorityProcessor)
 
-	timestampNow := pod1.Status.StartTime.Time.Add(time.Hour * 24)
+	timestampNow := pod1.Status.StartTime.Add(time.Hour * 24)
 	calculator.AddPod(pod1, timestampNow)
 	calculator.AddPod(pod2, timestampNow)
 	calculator.AddPod(pod3, timestampNow)
@@ -63,9 +63,9 @@ func TestSortPriority(t *testing.T) {
 }
 
 func TestSortPriorityResourcesDecrease(t *testing.T) {
-	pod1 := test.Pod().WithName("POD1").AddContainer(test.BuildTestContainer(containerName, "4", "")).Get()
-	pod2 := test.Pod().WithName("POD2").AddContainer(test.BuildTestContainer(containerName, "8", "")).Get()
-	pod3 := test.Pod().WithName("POD3").AddContainer(test.BuildTestContainer(containerName, "10", "")).Get()
+	pod1 := test.Pod().WithName("POD1").AddContainer(test.Container().WithName(containerName).WithCPURequest(resource.MustParse("4")).Get()).Get()
+	pod2 := test.Pod().WithName("POD2").AddContainer(test.Container().WithName(containerName).WithCPURequest(resource.MustParse("8")).Get()).Get()
+	pod3 := test.Pod().WithName("POD3").AddContainer(test.Container().WithName(containerName).WithCPURequest(resource.MustParse("10")).Get()).Get()
 
 	vpa := test.VerticalPodAutoscaler().WithContainer(containerName).WithTarget("5", "").Get()
 
@@ -76,7 +76,7 @@ func TestSortPriorityResourcesDecrease(t *testing.T) {
 	})
 	calculator := NewUpdatePriorityCalculator(vpa, nil, &test.FakeRecommendationProcessor{}, priorityProcessor)
 
-	timestampNow := pod1.Status.StartTime.Time.Add(time.Hour * 24)
+	timestampNow := pod1.Status.StartTime.Add(time.Hour * 24)
 	calculator.AddPod(pod1, timestampNow)
 	calculator.AddPod(pod2, timestampNow)
 	calculator.AddPod(pod3, timestampNow)
@@ -90,7 +90,7 @@ func TestSortPriorityResourcesDecrease(t *testing.T) {
 }
 
 func TestUpdateNotRequired(t *testing.T) {
-	pod1 := test.Pod().WithName("POD1").AddContainer(test.BuildTestContainer(containerName, "4", "")).Get()
+	pod1 := test.Pod().WithName("POD1").AddContainer(test.Container().WithName(containerName).WithCPURequest(resource.MustParse("4")).Get()).Get()
 	vpa := test.VerticalPodAutoscaler().WithContainer(containerName).WithTarget("4", "").Get()
 
 	priorityProcessor := NewFakeProcessor(map[string]PodPriority{"POD1": {
@@ -99,7 +99,7 @@ func TestUpdateNotRequired(t *testing.T) {
 	calculator := NewUpdatePriorityCalculator(vpa, nil, &test.FakeRecommendationProcessor{},
 		priorityProcessor)
 
-	timestampNow := pod1.Status.StartTime.Time.Add(time.Hour * 24)
+	timestampNow := pod1.Status.StartTime.Add(time.Hour * 24)
 	calculator.AddPod(pod1, timestampNow)
 
 	result := calculator.GetSortedPods(NewDefaultPodEvictionAdmission())
@@ -113,7 +113,7 @@ func TestUseProcessor(t *testing.T) {
 	recommendationProcessor.On("Apply").Return(processedRecommendation, nil)
 
 	vpa := test.VerticalPodAutoscaler().WithContainer(containerName).WithTarget("5", "5M").Get()
-	pod1 := test.Pod().WithName("POD1").AddContainer(test.BuildTestContainer(containerName, "4", "10M")).Get()
+	pod1 := test.Pod().WithName("POD1").AddContainer(test.Container().WithName(containerName).WithCPURequest(resource.MustParse("4")).WithMemRequest(resource.MustParse("10M")).Get()).Get()
 
 	priorityProcessor := NewFakeProcessor(map[string]PodPriority{
 		"POD1": {ResourceDiff: 0.0},
@@ -121,7 +121,7 @@ func TestUseProcessor(t *testing.T) {
 	calculator := NewUpdatePriorityCalculator(
 		vpa, nil, recommendationProcessor, priorityProcessor)
 
-	timestampNow := pod1.Status.StartTime.Time.Add(time.Hour * 24)
+	timestampNow := pod1.Status.StartTime.Add(time.Hour * 24)
 	calculator.AddPod(pod1, timestampNow)
 
 	result := calculator.GetSortedPods(NewDefaultPodEvictionAdmission())
@@ -134,9 +134,9 @@ func TestUseProcessor(t *testing.T) {
 // 2. diverging from the target by more than MinChangePriority.
 func TestUpdateLonglivedPods(t *testing.T) {
 	pods := []*apiv1.Pod{
-		test.Pod().WithName("POD1").AddContainer(test.BuildTestContainer(containerName, "4", "")).Get(),
-		test.Pod().WithName("POD2").AddContainer(test.BuildTestContainer(containerName, "1", "")).Get(),
-		test.Pod().WithName("POD3").AddContainer(test.BuildTestContainer(containerName, "8", "")).Get(),
+		test.Pod().WithName("POD1").AddContainer(test.Container().WithName(containerName).WithCPURequest(resource.MustParse("4")).Get()).Get(),
+		test.Pod().WithName("POD2").AddContainer(test.Container().WithName(containerName).WithCPURequest(resource.MustParse("1")).Get()).Get(),
+		test.Pod().WithName("POD3").AddContainer(test.Container().WithName(containerName).WithCPURequest(resource.MustParse("8")).Get()).Get(),
 	}
 
 	// Both pods are within the recommended range.
@@ -155,7 +155,7 @@ func TestUpdateLonglivedPods(t *testing.T) {
 		vpa, &UpdateConfig{MinChangePriority: 0.5}, &test.FakeRecommendationProcessor{}, priorityProcessor)
 
 	// Pretend that the test pods started 13 hours ago.
-	timestampNow := pods[0].Status.StartTime.Time.Add(time.Hour * 13)
+	timestampNow := pods[0].Status.StartTime.Add(time.Hour * 13)
 	for i := 0; i < 3; i++ {
 		calculator.AddPod(pods[i], timestampNow)
 	}
@@ -168,9 +168,9 @@ func TestUpdateLonglivedPods(t *testing.T) {
 // range for at least one container.
 func TestUpdateShortlivedPods(t *testing.T) {
 	pods := []*apiv1.Pod{
-		test.Pod().WithName("POD1").AddContainer(test.BuildTestContainer(containerName, "4", "")).Get(),
-		test.Pod().WithName("POD2").AddContainer(test.BuildTestContainer(containerName, "1", "")).Get(),
-		test.Pod().WithName("POD3").AddContainer(test.BuildTestContainer(containerName, "10", "")).Get(),
+		test.Pod().WithName("POD1").AddContainer(test.Container().WithName(containerName).WithCPURequest(resource.MustParse("4")).Get()).Get(),
+		test.Pod().WithName("POD2").AddContainer(test.Container().WithName(containerName).WithCPURequest(resource.MustParse("1")).Get()).Get(),
+		test.Pod().WithName("POD3").AddContainer(test.Container().WithName(containerName).WithCPURequest(resource.MustParse("10")).Get()).Get(),
 	}
 
 	// Pods 1 and 2 are within the recommended range.
@@ -189,7 +189,7 @@ func TestUpdateShortlivedPods(t *testing.T) {
 		vpa, &UpdateConfig{MinChangePriority: 0.5}, &test.FakeRecommendationProcessor{}, priorityProcessor)
 
 	// Pretend that the test pods started 11 hours ago.
-	timestampNow := pods[0].Status.StartTime.Time.Add(time.Hour * 11)
+	timestampNow := pods[0].Status.StartTime.Add(time.Hour * 11)
 	for i := 0; i < 3; i++ {
 		calculator.AddPod(pods[i], timestampNow)
 	}
@@ -198,10 +198,10 @@ func TestUpdateShortlivedPods(t *testing.T) {
 }
 
 func TestUpdatePodWithQuickOOM(t *testing.T) {
-	pod := test.Pod().WithName("POD1").AddContainer(test.BuildTestContainer(containerName, "4", "")).Get()
+	pod := test.Pod().WithName("POD1").AddContainer(test.Container().WithName(containerName).WithCPURequest(resource.MustParse("4")).Get()).Get()
 
 	// Pretend that the test pod started 11 hours ago.
-	timestampNow := pod.Status.StartTime.Time.Add(time.Hour * 11)
+	timestampNow := pod.Status.StartTime.Add(time.Hour * 11)
 
 	pod.Status.ContainerStatuses = []apiv1.ContainerStatus{
 		{
@@ -234,10 +234,10 @@ func TestUpdatePodWithQuickOOM(t *testing.T) {
 }
 
 func TestDontUpdatePodWithQuickOOMNoResourceChange(t *testing.T) {
-	pod := test.Pod().WithName("POD1").AddContainer(test.BuildTestContainer(containerName, "4", "8Gi")).Get()
+	pod := test.Pod().WithName("POD1").AddContainer(test.Container().WithName(containerName).WithCPURequest(resource.MustParse("4")).WithMemRequest(resource.MustParse("8Gi")).Get()).Get()
 
 	// Pretend that the test pod started 11 hours ago.
-	timestampNow := pod.Status.StartTime.Time.Add(time.Hour * 11)
+	timestampNow := pod.Status.StartTime.Add(time.Hour * 11)
 
 	pod.Status.ContainerStatuses = []apiv1.ContainerStatus{
 		{
@@ -270,10 +270,10 @@ func TestDontUpdatePodWithQuickOOMNoResourceChange(t *testing.T) {
 }
 
 func TestDontUpdatePodWithOOMAfterLongRun(t *testing.T) {
-	pod := test.Pod().WithName("POD1").AddContainer(test.BuildTestContainer(containerName, "4", "")).Get()
+	pod := test.Pod().WithName("POD1").AddContainer(test.Container().WithName(containerName).WithCPURequest(resource.MustParse("4")).Get()).Get()
 
 	// Pretend that the test pod started 11 hours ago.
-	timestampNow := pod.Status.StartTime.Time.Add(time.Hour * 11)
+	timestampNow := pod.Status.StartTime.Add(time.Hour * 11)
 
 	pod.Status.ContainerStatuses = []apiv1.ContainerStatus{
 		{
@@ -331,10 +331,10 @@ func TestQuickOOM_VpaOvservedContainers(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(fmt.Sprintf("test case: %s", tc.name), func(t *testing.T) {
 			pod := test.Pod().WithAnnotations(tc.annotation).
-				WithName("POD1").AddContainer(test.BuildTestContainer(containerName, "4", "")).Get()
+				WithName("POD1").AddContainer(test.Container().WithName(containerName).WithCPURequest(resource.MustParse("4")).Get()).Get()
 
 			// Pretend that the test pod started 11 hours ago.
-			timestampNow := pod.Status.StartTime.Time.Add(time.Hour * 11)
+			timestampNow := pod.Status.StartTime.Add(time.Hour * 11)
 
 			pod.Status.ContainerStatuses = []apiv1.ContainerStatus{
 				{
@@ -416,10 +416,10 @@ func TestQuickOOM_ContainerResourcePolicy(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(fmt.Sprintf("test case: %s", tc.name), func(t *testing.T) {
 			pod := test.Pod().WithAnnotations(map[string]string{annotations.VpaObservedContainersLabel: containerName}).
-				WithName("POD1").AddContainer(test.BuildTestContainer(containerName, "4", "")).Get()
+				WithName("POD1").AddContainer(test.Container().WithName(containerName).WithCPURequest(resource.MustParse("4")).Get()).Get()
 
 			// Pretend that the test pod started 11 hours ago.
-			timestampNow := pod.Status.StartTime.Time.Add(time.Hour * 11)
+			timestampNow := pod.Status.StartTime.Add(time.Hour * 11)
 
 			pod.Status.ContainerStatuses = []apiv1.ContainerStatus{
 				{
@@ -475,10 +475,10 @@ func (p *pod1Admission) CleanUp() {}
 
 func TestAdmission(t *testing.T) {
 
-	pod1 := test.Pod().WithName("POD1").AddContainer(test.BuildTestContainer(containerName, "2", "")).Get()
-	pod2 := test.Pod().WithName("POD2").AddContainer(test.BuildTestContainer(containerName, "4", "")).Get()
-	pod3 := test.Pod().WithName("POD3").AddContainer(test.BuildTestContainer(containerName, "1", "")).Get()
-	pod4 := test.Pod().WithName("POD4").AddContainer(test.BuildTestContainer(containerName, "3", "")).Get()
+	pod1 := test.Pod().WithName("POD1").AddContainer(test.Container().WithName(containerName).WithCPURequest(resource.MustParse("2")).Get()).Get()
+	pod2 := test.Pod().WithName("POD2").AddContainer(test.Container().WithName(containerName).WithCPURequest(resource.MustParse("4")).Get()).Get()
+	pod3 := test.Pod().WithName("POD3").AddContainer(test.Container().WithName(containerName).WithCPURequest(resource.MustParse("1")).Get()).Get()
+	pod4 := test.Pod().WithName("POD4").AddContainer(test.Container().WithName(containerName).WithCPURequest(resource.MustParse("3")).Get()).Get()
 
 	vpa := test.VerticalPodAutoscaler().WithContainer(containerName).WithTarget("10", "").Get()
 
@@ -490,7 +490,7 @@ func TestAdmission(t *testing.T) {
 	calculator := NewUpdatePriorityCalculator(vpa, nil,
 		&test.FakeRecommendationProcessor{}, priorityProcessor)
 
-	timestampNow := pod1.Status.StartTime.Time.Add(time.Hour * 24)
+	timestampNow := pod1.Status.StartTime.Add(time.Hour * 24)
 	calculator.AddPod(pod1, timestampNow)
 	calculator.AddPod(pod2, timestampNow)
 	calculator.AddPod(pod3, timestampNow)
@@ -553,4 +553,83 @@ func TestLessPodPriority(t *testing.T) {
 		})
 	}
 
+}
+
+func TestAddPodLogs(t *testing.T) {
+	testCases := []struct {
+		name        string
+		givenRec    *vpa_types.RecommendedPodResources
+		expectedLog string
+	}{
+		{
+			name:        "container with target and uncappedTarget",
+			givenRec:    test.Recommendation().WithContainer(containerName).WithTarget("4", "10M").Get(),
+			expectedLog: "container1: target: 10000k 4000m; uncappedTarget: 10000k 4000m;",
+		},
+		{
+			name:        "container with cpu only",
+			givenRec:    test.Recommendation().WithContainer(containerName).WithTarget("8", "").Get(),
+			expectedLog: "container1: target: 8000m; uncappedTarget: 8000m;",
+		},
+		{
+			name:        "container with memory only",
+			givenRec:    test.Recommendation().WithContainer(containerName).WithTarget("", "10M").Get(),
+			expectedLog: "container1: target: 10000k uncappedTarget: 10000k ",
+		},
+		{
+			name: "multi-container with different resources",
+			givenRec: &vpa_types.RecommendedPodResources{
+				ContainerRecommendations: []vpa_types.RecommendedContainerResources{
+					{
+						ContainerName: "container-1",
+						Target:        test.Resources("4", "10M"),
+					},
+					{
+						ContainerName: "container-2",
+						Target:        test.Resources("8", ""),
+					},
+					{
+						ContainerName: "container-3",
+						Target:        test.Resources("", "10m"),
+					},
+				},
+			},
+			expectedLog: "container-1: target: 10000k 4000m; container-2: target: 8000m; container-3: target: 1k ",
+		},
+		{
+			name: "multi-containers with uncappedTarget",
+			givenRec: &vpa_types.RecommendedPodResources{
+				ContainerRecommendations: []vpa_types.RecommendedContainerResources{
+					{
+						ContainerName:  "container-1",
+						Target:         test.Resources("4", "10M"),
+						UncappedTarget: test.Resources("4", "10M"),
+					},
+					{
+						ContainerName:  "container-2",
+						Target:         test.Resources("8", ""),
+						UncappedTarget: test.Resources("8", ""),
+					},
+					{
+						ContainerName:  "container-3",
+						Target:         test.Resources("", "10m"),
+						UncappedTarget: test.Resources("", "10m"),
+					},
+				},
+			},
+			expectedLog: "container-1: target: 10000k 4000m; uncappedTarget: 10000k 4000m;container-2: target: 8000m; uncappedTarget: 8000m;container-3: target: 1k uncappedTarget: 1k ",
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			vpa := test.VerticalPodAutoscaler().WithContainer(containerName).WithTarget("10", "").Get()
+			priorityProcessor := NewFakeProcessor(map[string]PodPriority{
+				"POD1": {ScaleUp: true, ResourceDiff: 4.0}})
+			calculator := NewUpdatePriorityCalculator(vpa, nil,
+				&test.FakeRecommendationProcessor{}, priorityProcessor)
+
+			actualLog := calculator.GetProcessedRecommendationTargets(tc.givenRec)
+			assert.Equal(t, tc.expectedLog, actualLog)
+		})
+	}
 }

@@ -20,8 +20,7 @@ import (
 	"time"
 
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
-
-	schedulerframework "k8s.io/kubernetes/pkg/scheduler/framework"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
 )
 
 // Backoff handles backing off executions.
@@ -37,6 +36,7 @@ type exponentialBackoffInfo struct {
 	duration            time.Duration
 	backoffUntil        time.Time
 	lastFailedExecution time.Time
+	errorInfo           cloudprovider.InstanceErrorInfo
 }
 
 // NewExponentialBackoff creates an instance of exponential backoff.
@@ -66,7 +66,7 @@ func NewIdBasedExponentialBackoff(initialBackoffDuration time.Duration, maxBacko
 }
 
 // Backoff execution for the given node group. Returns time till execution is backed off.
-func (b *exponentialBackoff) Backoff(nodeGroup cloudprovider.NodeGroup, nodeInfo *schedulerframework.NodeInfo, errorClass cloudprovider.InstanceErrorClass, errorCode string, currentTime time.Time) time.Time {
+func (b *exponentialBackoff) Backoff(nodeGroup cloudprovider.NodeGroup, nodeInfo *framework.NodeInfo, errorInfo cloudprovider.InstanceErrorInfo, currentTime time.Time) time.Time {
 	duration := b.initialBackoffDuration
 	key := b.nodeGroupKey(nodeGroup)
 	if backoffInfo, found := b.backoffInfo[key]; found {
@@ -87,18 +87,25 @@ func (b *exponentialBackoff) Backoff(nodeGroup cloudprovider.NodeGroup, nodeInfo
 		duration:            duration,
 		backoffUntil:        backoffUntil,
 		lastFailedExecution: currentTime,
+		errorInfo:           errorInfo,
 	}
 	return backoffUntil
 }
 
-// IsBackedOff returns true if execution is backed off for the given node group.
-func (b *exponentialBackoff) IsBackedOff(nodeGroup cloudprovider.NodeGroup, nodeInfo *schedulerframework.NodeInfo, currentTime time.Time) bool {
+// BackoffStatus returns whether the execution is backed off for the given node group and error info when the node group is backed off.
+func (b *exponentialBackoff) BackoffStatus(nodeGroup cloudprovider.NodeGroup, nodeInfo *framework.NodeInfo, currentTime time.Time) Status {
 	backoffInfo, found := b.backoffInfo[b.nodeGroupKey(nodeGroup)]
-	return found && backoffInfo.backoffUntil.After(currentTime)
+	if !found || backoffInfo.backoffUntil.Before(currentTime) {
+		return Status{IsBackedOff: false}
+	}
+	return Status{
+		IsBackedOff: true,
+		ErrorInfo:   backoffInfo.errorInfo,
+	}
 }
 
 // RemoveBackoff removes backoff data for the given node group.
-func (b *exponentialBackoff) RemoveBackoff(nodeGroup cloudprovider.NodeGroup, nodeInfo *schedulerframework.NodeInfo) {
+func (b *exponentialBackoff) RemoveBackoff(nodeGroup cloudprovider.NodeGroup, nodeInfo *framework.NodeInfo) {
 	delete(b.backoffInfo, b.nodeGroupKey(nodeGroup))
 }
 

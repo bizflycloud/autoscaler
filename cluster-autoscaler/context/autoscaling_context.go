@@ -18,14 +18,19 @@ package context
 
 import (
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
+	"k8s.io/autoscaler/cluster-autoscaler/clusterstate"
 	"k8s.io/autoscaler/cluster-autoscaler/clusterstate/utils"
 	"k8s.io/autoscaler/cluster-autoscaler/config"
+	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown"
+	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown/pdb"
 	"k8s.io/autoscaler/cluster-autoscaler/debuggingsnapshot"
-	"k8s.io/autoscaler/cluster-autoscaler/estimator"
 	"k8s.io/autoscaler/cluster-autoscaler/expander"
 	processor_callbacks "k8s.io/autoscaler/cluster-autoscaler/processors/callbacks"
-	"k8s.io/autoscaler/cluster-autoscaler/simulator"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/clustersnapshot"
+	draprovider "k8s.io/autoscaler/cluster-autoscaler/simulator/dynamicresources/provider"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
 	kube_util "k8s.io/autoscaler/cluster-autoscaler/utils/kubernetes"
+	"k8s.io/client-go/informers"
 	kube_client "k8s.io/client-go/kubernetes"
 	kube_record "k8s.io/client-go/tools/record"
 	klog "k8s.io/klog/v2"
@@ -40,19 +45,26 @@ type AutoscalingContext struct {
 	AutoscalingKubeClients
 	// CloudProvider used in CA.
 	CloudProvider cloudprovider.CloudProvider
-	// TODO(kgolab) - move away too as it's not config
-	// PredicateChecker to check if a pod can fit into a node.
-	PredicateChecker simulator.PredicateChecker
+	// FrameworkHandle can be used to interact with the scheduler framework.
+	FrameworkHandle *framework.Handle
 	// ClusterSnapshot denotes cluster snapshot used for predicate checking.
-	ClusterSnapshot simulator.ClusterSnapshot
+	ClusterSnapshot clustersnapshot.ClusterSnapshot
 	// ExpanderStrategy is the strategy used to choose which node group to expand when scaling up
 	ExpanderStrategy expander.Strategy
-	// EstimatorBuilder is the builder function for node count estimator to be used.
-	EstimatorBuilder estimator.EstimatorBuilder
 	// ProcessorCallbacks is interface defining extra callback methods which can be called by processors used in extension points.
 	ProcessorCallbacks processor_callbacks.ProcessorCallbacks
 	// DebuggingSnapshotter is the interface for capturing the debugging snapshot
 	DebuggingSnapshotter debuggingsnapshot.DebuggingSnapshotter
+	// ScaleDownActuator is the interface for draining and deleting nodes
+	ScaleDownActuator scaledown.Actuator
+	// RemainingPdbTracker tracks the remaining pod disruption budget
+	RemainingPdbTracker pdb.RemainingPdbTracker
+	// ClusterStateRegistry tracks the health of the node groups and pending scale-ups and scale-downs
+	ClusterStateRegistry *clusterstate.ClusterStateRegistry
+	//ProvisionRequstScaleUpMode indicates whether ClusterAutoscaler tries to accommodate ProvisioningRequest in current scale up iteration.
+	ProvisioningRequestScaleUpMode bool
+	// DraProvider is the provider for dynamic resources allocation.
+	DraProvider *draprovider.Provider
 }
 
 // AutoscalingKubeClients contains all Kubernetes API clients,
@@ -90,38 +102,42 @@ func NewResourceLimiterFromAutoscalingOptions(options config.AutoscalingOptions)
 // NewAutoscalingContext returns an autoscaling context from all the necessary parameters passed via arguments
 func NewAutoscalingContext(
 	options config.AutoscalingOptions,
-	predicateChecker simulator.PredicateChecker,
-	clusterSnapshot simulator.ClusterSnapshot,
+	fwHandle *framework.Handle,
+	clusterSnapshot clustersnapshot.ClusterSnapshot,
 	autoscalingKubeClients *AutoscalingKubeClients,
 	cloudProvider cloudprovider.CloudProvider,
 	expanderStrategy expander.Strategy,
-	estimatorBuilder estimator.EstimatorBuilder,
 	processorCallbacks processor_callbacks.ProcessorCallbacks,
-	debuggingSnapshotter debuggingsnapshot.DebuggingSnapshotter) *AutoscalingContext {
+	debuggingSnapshotter debuggingsnapshot.DebuggingSnapshotter,
+	remainingPdbTracker pdb.RemainingPdbTracker,
+	clusterStateRegistry *clusterstate.ClusterStateRegistry,
+	draProvider *draprovider.Provider,
+) *AutoscalingContext {
 	return &AutoscalingContext{
 		AutoscalingOptions:     options,
 		CloudProvider:          cloudProvider,
 		AutoscalingKubeClients: *autoscalingKubeClients,
-		PredicateChecker:       predicateChecker,
+		FrameworkHandle:        fwHandle,
 		ClusterSnapshot:        clusterSnapshot,
 		ExpanderStrategy:       expanderStrategy,
-		EstimatorBuilder:       estimatorBuilder,
 		ProcessorCallbacks:     processorCallbacks,
 		DebuggingSnapshotter:   debuggingSnapshotter,
+		RemainingPdbTracker:    remainingPdbTracker,
+		ClusterStateRegistry:   clusterStateRegistry,
+		DraProvider:            draProvider,
 	}
 }
 
 // NewAutoscalingKubeClients builds AutoscalingKubeClients out of basic client.
-func NewAutoscalingKubeClients(opts config.AutoscalingOptions, kubeClient, eventsKubeClient kube_client.Interface) *AutoscalingKubeClients {
-	listerRegistryStopChannel := make(chan struct{})
-	listerRegistry := kube_util.NewListerRegistryWithDefaultListers(kubeClient, listerRegistryStopChannel)
-	kubeEventRecorder := kube_util.CreateEventRecorder(eventsKubeClient)
+func NewAutoscalingKubeClients(opts config.AutoscalingOptions, kubeClient kube_client.Interface, informerFactory informers.SharedInformerFactory) *AutoscalingKubeClients {
+	listerRegistry := kube_util.NewListerRegistryWithDefaultListers(informerFactory)
+	kubeEventRecorder := kube_util.CreateEventRecorder(kubeClient, opts.RecordDuplicatedEvents)
 	logRecorder, err := utils.NewStatusMapRecorder(kubeClient, opts.ConfigNamespace, kubeEventRecorder, opts.WriteStatusConfigMap, opts.StatusConfigMapName)
 	if err != nil {
 		klog.Error("Failed to initialize status configmap, unable to write status events")
 		// Get a dummy, so we can at least safely call the methods
 		// TODO(maciekpytel): recover from this after successful status configmap update?
-		logRecorder, _ = utils.NewStatusMapRecorder(eventsKubeClient, opts.ConfigNamespace, kubeEventRecorder, false, opts.StatusConfigMapName)
+		logRecorder, _ = utils.NewStatusMapRecorder(kubeClient, opts.ConfigNamespace, kubeEventRecorder, false, opts.StatusConfigMapName)
 	}
 
 	return &AutoscalingKubeClients{

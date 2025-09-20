@@ -17,55 +17,64 @@ limitations under the License.
 package ionoscloud
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
-	"github.com/google/uuid"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
 	ionos "k8s.io/autoscaler/cluster-autoscaler/cloudprovider/ionoscloud/ionos-cloud-sdk-go"
 )
 
 const (
-	// ProviderIdPrefix is the prefix of the provider id of a Kubernetes node object.
-	ProviderIdPrefix = "ionos://"
+	// ProviderIDPrefix is the prefix of the provider id of a Kubernetes node object.
+	ProviderIDPrefix = "ionos://"
 	// ErrorCodeUnknownState is set if the IonosCloud Kubernetes instace has an unknown state.
 	ErrorCodeUnknownState = "UNKNOWN_STATE"
 )
 
-// convertToInstanceId converts an IonosCloud kubernetes node Id to a cloudprovider.Instance Id.
-func convertToInstanceId(nodeId string) string {
-	return fmt.Sprintf("%s%s", ProviderIdPrefix, nodeId)
+var errMissingNodeID = errors.New("missing node ID")
+
+// convertToInstanceID converts an IonosCloud kubernetes node Id to a cloudprovider.Instance Id.
+func convertToInstanceID(nodeID string) string {
+	return fmt.Sprintf("%s%s", ProviderIDPrefix, nodeID)
 }
 
-// convertToNodeId converts a cloudprovider.Instance Id to an IonosCloud kubernetes node Id.
-func convertToNodeId(providerId string) string {
-	return strings.TrimPrefix(providerId, ProviderIdPrefix)
+// convertToNodeID converts a cloudprovider.Instance Id to an IonosCloud kubernetes node Id.
+func convertToNodeID(providerID string) string {
+	return strings.TrimPrefix(providerID, ProviderIDPrefix)
 }
 
 // convertToInstances converts a list IonosCloud kubernetes nodes to a list of cloudprovider.Instances.
-func convertToInstances(nodes *ionos.KubernetesNodes) []cloudprovider.Instance {
-	instances := make([]cloudprovider.Instance, 0, len(*nodes.Items))
-	for _, node := range *nodes.Items {
-		instances = append(instances, convertToInstance(node))
+func convertToInstances(nodes []ionos.KubernetesNode) ([]cloudprovider.Instance, error) {
+	instances := make([]cloudprovider.Instance, 0, len(nodes))
+	for _, node := range nodes {
+		instance, err := convertToInstance(node)
+		if err != nil {
+			return nil, err
+		}
+		instances = append(instances, instance)
 	}
-	return instances
+	return instances, nil
 }
 
 // to Instance converts an IonosCloud kubernetes node to a cloudprovider.Instance.
-func convertToInstance(node ionos.KubernetesNode) cloudprovider.Instance {
-	return cloudprovider.Instance{
-		Id:     convertToInstanceId(*node.Id),
-		Status: convertToInstanceStatus(*node.Metadata.State),
+func convertToInstance(node ionos.KubernetesNode) (cloudprovider.Instance, error) {
+	if node.Id == nil {
+		return cloudprovider.Instance{}, errMissingNodeID
 	}
+	return cloudprovider.Instance{
+		Id:     convertToInstanceID(*node.Id),
+		Status: convertToInstanceStatus(*node.Metadata.State),
+	}, nil
 }
 
 // convertToInstanceStatus converts an IonosCloud kubernetes node state to a *cloudprovider.InstanceStatus.
 func convertToInstanceStatus(nodeState string) *cloudprovider.InstanceStatus {
 	st := &cloudprovider.InstanceStatus{}
 	switch nodeState {
-	case K8sNodeStateProvisioning, K8sNodeStateProvisioned, K8sNodeStateRebuilding:
+	case K8sNodeStateProvisioning, K8sNodeStateProvisioned:
 		st.State = cloudprovider.InstanceCreating
-	case K8sNodeStateTerminating:
+	case K8sNodeStateTerminating, K8sNodeStateRebuilding:
 		st.State = cloudprovider.InstanceDeleting
 	case K8sNodeStateReady:
 		st.State = cloudprovider.InstanceRunning
@@ -73,13 +82,8 @@ func convertToInstanceStatus(nodeState string) *cloudprovider.InstanceStatus {
 		st.ErrorInfo = &cloudprovider.InstanceErrorInfo{
 			ErrorClass:   cloudprovider.OtherErrorClass,
 			ErrorCode:    ErrorCodeUnknownState,
-			ErrorMessage: fmt.Sprintf("Unknown node state: %s", nodeState),
+			ErrorMessage: "Unknown node state: " + nodeState,
 		}
 	}
 	return st
-}
-
-// NewUUID returns a new UUID as string.
-func NewUUID() string {
-	return uuid.New().String()
 }

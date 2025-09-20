@@ -62,14 +62,28 @@ func FilterOutNodes(nodes []*apiv1.Node, nodesToFilterOut []*apiv1.Node) []*apiv
 // an equivalence group per pod which is undesirable.
 // Projected volumes do not impact scheduling so we should ignore them
 func PodSpecSemanticallyEqual(p1 apiv1.PodSpec, p2 apiv1.PodSpec) bool {
-	p1Spec := sanitizeProjectedVolumesAndMounts(p1)
-	p2Spec := sanitizeProjectedVolumesAndMounts(p2)
+	p1Spec := sanitizePodSpec(p1)
+	p2Spec := sanitizePodSpec(p2)
 	return apiequality.Semantic.DeepEqual(p1Spec, p2Spec)
 }
 
-// sanitizeProjectedVolumesAndMounts returns a pod spec with projected volumes
-// and their mounts removed
-func sanitizeProjectedVolumesAndMounts(podSpec apiv1.PodSpec) apiv1.PodSpec {
+func sanitizePodSpec(podSpec apiv1.PodSpec) apiv1.PodSpec {
+	dropProjectedVolumesAndMounts(&podSpec)
+	dropHostname(&podSpec)
+	dropEnv(&podSpec)
+	return podSpec
+}
+
+func dropEnv(podSpec *apiv1.PodSpec) {
+	for i := range podSpec.Containers {
+		podSpec.Containers[i].Env = nil
+	}
+	for i := range podSpec.InitContainers {
+		podSpec.InitContainers[i].Env = nil
+	}
+}
+
+func dropProjectedVolumesAndMounts(podSpec *apiv1.PodSpec) {
 	projectedVolumeNames := map[string]bool{}
 	var volumes []apiv1.Volume
 	for _, v := range podSpec.Volumes {
@@ -90,5 +104,18 @@ func sanitizeProjectedVolumesAndMounts(podSpec apiv1.PodSpec) apiv1.PodSpec {
 		}
 		podSpec.Containers[i].VolumeMounts = volumeMounts
 	}
-	return podSpec
+
+	for i := range podSpec.InitContainers {
+		var volumeMounts []apiv1.VolumeMount
+		for _, mount := range podSpec.InitContainers[i].VolumeMounts {
+			if ok := projectedVolumeNames[mount.Name]; !ok {
+				volumeMounts = append(volumeMounts, mount)
+			}
+		}
+		podSpec.InitContainers[i].VolumeMounts = volumeMounts
+	}
+}
+
+func dropHostname(podSpec *apiv1.PodSpec) {
+	podSpec.Hostname = ""
 }

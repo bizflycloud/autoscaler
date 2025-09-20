@@ -20,14 +20,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
-	"github.com/onsi/ginkgo"
+	ginkgo "github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	autoscaling "k8s.io/api/autoscaling/v1"
 	batchv1 "k8s.io/api/batch/v1"
-	batchv1beta1 "k8s.io/api/batch/v1beta1"
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -54,9 +54,15 @@ const (
 	// VpaEvictionTimeout is a timeout for VPA to restart a pod if there are no
 	// mechanisms blocking it (for example PDB).
 	VpaEvictionTimeout = 3 * time.Minute
+	// VpaInPlaceTimeout is a timeout for the VPA to finish in-place resizing a
+	// pod, if there are no mechanisms blocking it.
+	VpaInPlaceTimeout = 2 * time.Minute
 
 	defaultHamsterReplicas     = int32(3)
 	defaultHamsterBackoffLimit = int32(10)
+
+	// VpaNamespace is the default namespace that holds the all the VPA components.
+	VpaNamespace = "kube-system"
 )
 
 var hamsterTargetRef = &autoscaling.CrossVersionObjectReference{
@@ -68,38 +74,35 @@ var hamsterTargetRef = &autoscaling.CrossVersionObjectReference{
 var hamsterLabels = map[string]string{"app": "hamster"}
 
 // SIGDescribe adds sig-autoscaling tag to test description.
-func SIGDescribe(text string, body func()) bool {
-	return ginkgo.Describe(fmt.Sprintf("[sig-autoscaling] %v", text), body)
-}
-
-// E2eDescribe describes a VPA e2e test.
-func E2eDescribe(scenario, name string, body func()) bool {
-	return SIGDescribe(fmt.Sprintf("[VPA] [%s] [v1] %s", scenario, name), body)
+// Takes args that are passed to ginkgo.Describe.
+func SIGDescribe(scenario, name string, args ...interface{}) bool {
+	full := fmt.Sprintf("[sig-autoscaling] [VPA] [%s] [v1] %s", scenario, name)
+	return ginkgo.Describe(full, args...)
 }
 
 // RecommenderE2eDescribe describes a VPA recommender e2e test.
-func RecommenderE2eDescribe(name string, body func()) bool {
-	return E2eDescribe(recommenderComponent, name, body)
+func RecommenderE2eDescribe(name string, args ...interface{}) bool {
+	return SIGDescribe(recommenderComponent, name, args...)
 }
 
 // UpdaterE2eDescribe describes a VPA updater e2e test.
-func UpdaterE2eDescribe(name string, body func()) bool {
-	return E2eDescribe(updateComponent, name, body)
+func UpdaterE2eDescribe(name string, args ...interface{}) bool {
+	return SIGDescribe(updateComponent, name, args...)
 }
 
 // AdmissionControllerE2eDescribe describes a VPA admission controller e2e test.
-func AdmissionControllerE2eDescribe(name string, body func()) bool {
-	return E2eDescribe(admissionControllerComponent, name, body)
+func AdmissionControllerE2eDescribe(name string, args ...interface{}) bool {
+	return SIGDescribe(admissionControllerComponent, name, args...)
 }
 
 // FullVpaE2eDescribe describes a VPA full stack e2e test.
-func FullVpaE2eDescribe(name string, body func()) bool {
-	return E2eDescribe(fullVpaSuite, name, body)
+func FullVpaE2eDescribe(name string, args ...interface{}) bool {
+	return SIGDescribe(fullVpaSuite, name, args...)
 }
 
 // ActuationSuiteE2eDescribe describes a VPA actuation e2e test.
-func ActuationSuiteE2eDescribe(name string, body func()) bool {
-	return E2eDescribe(actuationSuite, name, body)
+func ActuationSuiteE2eDescribe(name string, args ...interface{}) bool {
+	return SIGDescribe(actuationSuite, name, args...)
 }
 
 // GetHamsterContainerNameByIndex returns name of i-th hamster container.
@@ -145,7 +148,7 @@ func NewNHamstersDeployment(f *framework.Framework, n int) *appsv1.Deployment {
 		defaultHamsterReplicas,                     /*replicas*/
 		hamsterLabels,                              /*podLabels*/
 		GetHamsterContainerNameByIndex(0),          /*imageName*/
-		"k8s.gcr.io/ubuntu-slim:0.1",               /*image*/
+		"registry.k8s.io/ubuntu-slim:0.14",         /*image*/
 		appsv1.RollingUpdateDeploymentStrategyType, /*strategyType*/
 	)
 	d.ObjectMeta.Namespace = f.Namespace.Name
@@ -208,19 +211,19 @@ func GetHamsterPods(f *framework.Framework) (*apiv1.PodList, error) {
 }
 
 // NewTestCronJob returns a CronJob for test purposes.
-func NewTestCronJob(name, schedule string, replicas int32) *batchv1beta1.CronJob {
+func NewTestCronJob(name, schedule string, replicas int32) *batchv1.CronJob {
 	backoffLimit := defaultHamsterBackoffLimit
-	sj := &batchv1beta1.CronJob{
+	sj := &batchv1.CronJob{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
 		},
 		TypeMeta: metav1.TypeMeta{
 			Kind: "CronJob",
 		},
-		Spec: batchv1beta1.CronJobSpec{
+		Spec: batchv1.CronJobSpec{
 			Schedule:          schedule,
-			ConcurrencyPolicy: batchv1beta1.AllowConcurrent,
-			JobTemplate: batchv1beta1.JobTemplateSpec{
+			ConcurrencyPolicy: batchv1.AllowConcurrent,
+			JobTemplate: batchv1.JobTemplateSpec{
 				Spec: batchv1.JobSpec{
 					Parallelism:  &replicas,
 					Completions:  &replicas,
@@ -242,7 +245,7 @@ func NewTestCronJob(name, schedule string, replicas int32) *batchv1beta1.CronJob
 }
 
 func waitForActiveJobs(c clientset.Interface, ns, cronJobName string, active int) error {
-	return wait.Poll(framework.Poll, cronJobsWaitTimeout, func() (bool, error) {
+	return wait.PollUntilContextTimeout(context.Background(), framework.Poll, cronJobsWaitTimeout, true, func(ctx context.Context) (done bool, err error) {
 		curr, err := getCronJob(c, ns, cronJobName)
 		if err != nil {
 			return false, err
@@ -251,12 +254,12 @@ func waitForActiveJobs(c clientset.Interface, ns, cronJobName string, active int
 	})
 }
 
-func createCronJob(c clientset.Interface, ns string, cronJob *batchv1beta1.CronJob) (*batchv1beta1.CronJob, error) {
-	return c.BatchV1beta1().CronJobs(ns).Create(context.TODO(), cronJob, metav1.CreateOptions{})
+func createCronJob(c clientset.Interface, ns string, cronJob *batchv1.CronJob) (*batchv1.CronJob, error) {
+	return c.BatchV1().CronJobs(ns).Create(context.TODO(), cronJob, metav1.CreateOptions{})
 }
 
-func getCronJob(c clientset.Interface, ns, name string) (*batchv1beta1.CronJob, error) {
-	return c.BatchV1beta1().CronJobs(ns).Get(context.TODO(), name, metav1.GetOptions{})
+func getCronJob(c clientset.Interface, ns, name string) (*batchv1.CronJob, error) {
+	return c.BatchV1().CronJobs(ns).Get(context.TODO(), name, metav1.GetOptions{})
 }
 
 // SetupHamsterCronJob creates and sets up a new CronJob
@@ -279,7 +282,7 @@ func SetupHamsterContainer(cpu, memory string) apiv1.Container {
 
 	return apiv1.Container{
 		Name:  "hamster",
-		Image: "k8s.gcr.io/ubuntu-slim:0.1",
+		Image: "registry.k8s.io/ubuntu-slim:0.14",
 		Resources: apiv1.ResourceRequirements{
 			Requests: apiv1.ResourceList{
 				apiv1.ResourceCPU:    cpuQuantity,
@@ -289,71 +292,6 @@ func SetupHamsterContainer(cpu, memory string) apiv1.Container {
 		Command: []string{"/bin/sh"},
 		Args:    []string{"-c", "while true; do sleep 10 ; done"},
 	}
-}
-
-// SetupVPA creates and installs a simple hamster VPA for e2e test purposes.
-func SetupVPA(f *framework.Framework, cpu string, mode vpa_types.UpdateMode, targetRef *autoscaling.CrossVersionObjectReference) *vpa_types.VerticalPodAutoscaler {
-	return SetupVPAForNHamsters(f, 1, cpu, mode, targetRef)
-}
-
-// SetupVPAForNHamsters creates and installs a simple hamster VPA for a pod with n containers, for e2e test purposes.
-func SetupVPAForNHamsters(f *framework.Framework, n int, cpu string, mode vpa_types.UpdateMode, targetRef *autoscaling.CrossVersionObjectReference) *vpa_types.VerticalPodAutoscaler {
-	return SetupVPAForNHamstersWithMinReplicas(f, n, cpu, mode, targetRef, nil)
-}
-
-// SetupVPAForNHamstersWithMinReplicas creates and installs a simple hamster VPA for a pod with n containers, setting MinReplicas. To be used for e2e test purposes.
-func SetupVPAForNHamstersWithMinReplicas(f *framework.Framework, n int, cpu string, mode vpa_types.UpdateMode, targetRef *autoscaling.CrossVersionObjectReference, minReplicas *int32) *vpa_types.VerticalPodAutoscaler {
-	vpaCRD := NewVPA(f, "hamster-vpa", targetRef, []*vpa_types.VerticalPodAutoscalerRecommenderSelector{})
-	vpaCRD.Spec.UpdatePolicy.UpdateMode = &mode
-	vpaCRD.Spec.UpdatePolicy.MinReplicas = minReplicas
-
-	cpuQuantity := ParseQuantityOrDie(cpu)
-	resourceList := apiv1.ResourceList{apiv1.ResourceCPU: cpuQuantity}
-
-	containerRecommendations := []vpa_types.RecommendedContainerResources{}
-	for i := 0; i < n; i++ {
-		containerRecommendations = append(containerRecommendations,
-			vpa_types.RecommendedContainerResources{
-				ContainerName: GetHamsterContainerNameByIndex(i),
-				Target:        resourceList,
-				LowerBound:    resourceList,
-				UpperBound:    resourceList,
-			},
-		)
-	}
-	vpaCRD.Status.Recommendation = &vpa_types.RecommendedPodResources{
-		ContainerRecommendations: containerRecommendations,
-	}
-
-	InstallVPA(f, vpaCRD)
-	return vpaCRD
-}
-
-// NewVPA creates a VPA object for e2e test purposes.
-func NewVPA(f *framework.Framework, name string, targetRef *autoscaling.CrossVersionObjectReference, recommenders []*vpa_types.VerticalPodAutoscalerRecommenderSelector) *vpa_types.VerticalPodAutoscaler {
-	updateMode := vpa_types.UpdateModeAuto
-	vpa := vpa_types.VerticalPodAutoscaler{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: f.Namespace.Name,
-		},
-		Spec: vpa_types.VerticalPodAutoscalerSpec{
-			TargetRef: targetRef,
-			UpdatePolicy: &vpa_types.PodUpdatePolicy{
-				UpdateMode: &updateMode,
-			},
-			ResourcePolicy: &vpa_types.PodResourcePolicy{
-				ContainerPolicies: []vpa_types.ContainerResourcePolicy{},
-			},
-		},
-	}
-
-	if len(recommenders) == 0 {
-		return &vpa
-	}
-
-	vpa.Spec.Recommenders = recommenders
-	return &vpa
 }
 
 type patchRecord struct {
@@ -373,6 +311,23 @@ func InstallVPA(f *framework.Framework, vpa *vpa_types.VerticalPodAutoscaler) {
 	vpaClientSet := getVpaClientSet(f)
 	_, err := vpaClientSet.AutoscalingV1().VerticalPodAutoscalers(f.Namespace.Name).Create(context.TODO(), vpa, metav1.CreateOptions{})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "unexpected error creating VPA")
+	// apiserver ignore status in vpa create, so need to update status
+	if !isStatusEmpty(&vpa.Status) {
+		if vpa.Status.Recommendation != nil {
+			PatchVpaRecommendation(f, vpa, vpa.Status.Recommendation)
+		}
+	}
+}
+
+func isStatusEmpty(status *vpa_types.VerticalPodAutoscalerStatus) bool {
+	if status == nil {
+		return true
+	}
+
+	if len(status.Conditions) == 0 && status.Recommendation == nil {
+		return true
+	}
+	return false
 }
 
 // InstallRawVPA installs a VPA object passed in as raw json in the test cluster.
@@ -397,7 +352,7 @@ func PatchVpaRecommendation(f *framework.Framework, vpa *vpa_types.VerticalPodAu
 		Value: *newStatus,
 	}})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	_, err = getVpaClientSet(f).AutoscalingV1().VerticalPodAutoscalers(f.Namespace.Name).Patch(context.TODO(), vpa.Name, types.JSONPatchType, bytes, metav1.PatchOptions{})
+	_, err = getVpaClientSet(f).AutoscalingV1().VerticalPodAutoscalers(f.Namespace.Name).Patch(context.TODO(), vpa.Name, types.JSONPatchType, bytes, metav1.PatchOptions{}, "status")
 	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "Failed to patch VPA.")
 }
 
@@ -440,7 +395,7 @@ func MakePodSet(pods *apiv1.PodList) PodSet {
 func WaitForPodsRestarted(f *framework.Framework, podList *apiv1.PodList) error {
 	initialPodSet := MakePodSet(podList)
 
-	err := wait.PollImmediate(pollInterval, pollTimeout, func() (bool, error) {
+	return wait.PollUntilContextTimeout(context.Background(), pollInterval, pollTimeout, true, func(ctx context.Context) (done bool, err error) {
 		currentPodList, err := GetHamsterPods(f)
 		if err != nil {
 			return false, err
@@ -448,18 +403,13 @@ func WaitForPodsRestarted(f *framework.Framework, podList *apiv1.PodList) error 
 		currentPodSet := MakePodSet(currentPodList)
 		return WerePodsSuccessfullyRestarted(currentPodSet, initialPodSet), nil
 	})
-
-	if err != nil {
-		return fmt.Errorf("waiting for set of pods changed: %v", err)
-	}
-	return nil
 }
 
 // WaitForPodsEvicted waits until some pods from the list are evicted.
 func WaitForPodsEvicted(f *framework.Framework, podList *apiv1.PodList) error {
 	initialPodSet := MakePodSet(podList)
 
-	err := wait.PollImmediate(pollInterval, pollTimeout, func() (bool, error) {
+	return wait.PollUntilContextTimeout(context.Background(), pollInterval, pollTimeout, true, func(ctx context.Context) (done bool, err error) {
 		currentPodList, err := GetHamsterPods(f)
 		if err != nil {
 			return false, err
@@ -467,11 +417,6 @@ func WaitForPodsEvicted(f *framework.Framework, podList *apiv1.PodList) error {
 		currentPodSet := MakePodSet(currentPodList)
 		return GetEvictedPodsCount(currentPodSet, initialPodSet) > 0, nil
 	})
-
-	if err != nil {
-		return fmt.Errorf("waiting for set of pods changed: %v", err)
-	}
-	return nil
 }
 
 // WerePodsSuccessfullyRestarted returns true if some pods from initialPodSet have been
@@ -518,8 +463,7 @@ func CheckNoPodsEvicted(f *framework.Framework, initialPodSet PodSet) {
 // polled vpa object. On timeout returns error.
 func WaitForVPAMatch(c vpa_clientset.Interface, vpa *vpa_types.VerticalPodAutoscaler, match func(vpa *vpa_types.VerticalPodAutoscaler) bool) (*vpa_types.VerticalPodAutoscaler, error) {
 	var polledVpa *vpa_types.VerticalPodAutoscaler
-	err := wait.PollImmediate(pollInterval, pollTimeout, func() (bool, error) {
-		var err error
+	err := wait.PollUntilContextTimeout(context.Background(), pollInterval, pollTimeout, true, func(ctx context.Context) (done bool, err error) {
 		polledVpa, err = c.AutoscalingV1().VerticalPodAutoscalers(vpa.Namespace).Get(context.TODO(), vpa.Name, metav1.GetOptions{})
 		if err != nil {
 			return false, err
@@ -614,4 +558,65 @@ func InstallLimitRangeWithMin(f *framework.Framework, minCpuLimit, minMemoryLimi
 	minCpuLimitQuantity := ParseQuantityOrDie(minCpuLimit)
 	minMemoryLimitQuantity := ParseQuantityOrDie(minMemoryLimit)
 	installLimitRange(f, &minCpuLimitQuantity, &minMemoryLimitQuantity, nil, nil, lrType)
+}
+
+// WaitForPodsUpdatedWithoutEviction waits for pods to be updated without any evictions taking place over the polling
+// interval.
+// TODO: Use events to track in-place resizes instead of polling when ready: https://github.com/kubernetes/kubernetes/issues/127172
+func WaitForPodsUpdatedWithoutEviction(f *framework.Framework, initialPods *apiv1.PodList) error {
+	framework.Logf("waiting for at least one pod to be updated without eviction")
+	err := wait.PollUntilContextTimeout(context.TODO(), pollInterval, VpaInPlaceTimeout, false, func(context.Context) (bool, error) {
+		podList, err := GetHamsterPods(f)
+		if err != nil {
+			return false, err
+		}
+		resourcesHaveDiffered := false
+		podMissing := false
+		for _, initialPod := range initialPods.Items {
+			found := false
+			for _, pod := range podList.Items {
+				if initialPod.Name == pod.Name {
+					found = true
+					for num, container := range pod.Status.ContainerStatuses {
+						for resourceName, resourceLimit := range container.Resources.Limits {
+							initialResourceLimit := initialPod.Status.ContainerStatuses[num].Resources.Limits[resourceName]
+							if !resourceLimit.Equal(initialResourceLimit) {
+								framework.Logf("%s/%s: %s limit status(%v) differs from initial limit spec(%v)", pod.Name, container.Name, resourceName, resourceLimit.String(), initialResourceLimit.String())
+								resourcesHaveDiffered = true
+							}
+						}
+						for resourceName, resourceRequest := range container.Resources.Requests {
+							initialResourceRequest := initialPod.Status.ContainerStatuses[num].Resources.Requests[resourceName]
+							if !resourceRequest.Equal(initialResourceRequest) {
+								framework.Logf("%s/%s: %s request status(%v) differs from initial request spec(%v)", pod.Name, container.Name, resourceName, resourceRequest.String(), initialResourceRequest.String())
+								resourcesHaveDiffered = true
+							}
+						}
+					}
+				}
+			}
+			if !found {
+				podMissing = true
+			}
+		}
+		if podMissing {
+			return true, fmt.Errorf("a pod was erroneously evicted")
+		}
+		if resourcesHaveDiffered {
+			framework.Logf("after checking %d pods, resources have started to differ for at least one of them", len(podList.Items))
+			return true, nil
+		}
+		return false, nil
+	})
+	framework.Logf("finished waiting for at least one pod to be updated without eviction")
+	return err
+}
+
+func anyContainsSubstring(arr []string, substr string) bool {
+	for _, s := range arr {
+		if strings.Contains(s, substr) {
+			return true
+		}
+	}
+	return false
 }

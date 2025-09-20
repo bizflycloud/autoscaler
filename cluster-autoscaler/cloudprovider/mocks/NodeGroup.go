@@ -20,7 +20,7 @@ import (
 	cloudprovider "k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
 	config "k8s.io/autoscaler/cluster-autoscaler/config"
 
-	framework "k8s.io/kubernetes/pkg/scheduler/framework"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
 
 	mock "github.com/stretchr/testify/mock"
 
@@ -125,6 +125,20 @@ func (_m *NodeGroup) DeleteNodes(_a0 []*v1.Node) error {
 	return r0
 }
 
+// ForceDeleteNodes deletes nodes from the group regardless of constraints.
+func (_m *NodeGroup) ForceDeleteNodes(_a0 []*v1.Node) error {
+	ret := _m.Called(_a0)
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func([]*v1.Node) error); ok {
+		r0 = rf(_a0)
+	} else {
+		r0 = ret.Error(0)
+	}
+
+	return r0
+}
+
 // Exist provides a mock function with given fields:
 func (_m *NodeGroup) Exist() bool {
 	ret := _m.Called()
@@ -178,6 +192,20 @@ func (_m *NodeGroup) Id() string {
 
 // IncreaseSize provides a mock function with given fields: delta
 func (_m *NodeGroup) IncreaseSize(delta int) error {
+	ret := _m.Called(delta)
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func(int) error); ok {
+		r0 = rf(delta)
+	} else {
+		r0 = ret.Error(0)
+	}
+
+	return r0
+}
+
+// AtomicIncreaseSize provides a mock function with given fields: delta
+func (_m *NodeGroup) AtomicIncreaseSize(delta int) error {
 	ret := _m.Called(delta)
 
 	var r0 error

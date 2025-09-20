@@ -25,36 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	schedulerframework "k8s.io/kubernetes/pkg/scheduler/framework"
 )
-
-func TestSanitizeNodeInfo(t *testing.T) {
-	pod := BuildTestPod("p1", 80, 0)
-	pod.Spec.NodeName = "n1"
-
-	node := BuildTestNode("node", 1000, 1000)
-
-	nodeInfo := schedulerframework.NewNodeInfo(pod)
-	nodeInfo.SetNode(node)
-
-	res, err := SanitizeNodeInfo(nodeInfo, "test-group", nil)
-	assert.NoError(t, err)
-	assert.Equal(t, 1, len(res.Pods))
-}
-
-func TestSanitizeLabels(t *testing.T) {
-	oldNode := BuildTestNode("ng1-1", 1000, 1000)
-	oldNode.Labels = map[string]string{
-		apiv1.LabelHostname: "abc",
-		"x":                 "y",
-	}
-	node, err := sanitizeTemplateNode(oldNode, "bzium", nil)
-	assert.NoError(t, err)
-	assert.NotEqual(t, node.Labels[apiv1.LabelHostname], "abc", nil)
-	assert.Equal(t, node.Labels["x"], "y")
-	assert.NotEqual(t, node.Name, oldNode.Name)
-	assert.Equal(t, node.Labels[apiv1.LabelHostname], node.Name)
-}
 
 func TestGetNodeResource(t *testing.T) {
 	node := BuildTestNode("n1", 1000, 2*MiB)

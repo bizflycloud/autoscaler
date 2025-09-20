@@ -54,15 +54,6 @@ func NewLimitsRangeCalculator(f informers.SharedInformerFactory) (*limitsChecker
 		return nil, fmt.Errorf("NewLimitsRangeCalculator requires a SharedInformerFactory but got nil")
 	}
 	limitRangeLister := f.Core().V1().LimitRanges().Lister()
-	stopCh := make(chan struct{})
-	f.Start(stopCh)
-	for _, ok := range f.WaitForCacheSync(stopCh) {
-		if !ok {
-			if !f.Core().V1().LimitRanges().Informer().HasSynced() {
-				return nil, fmt.Errorf("informer did not sync")
-			}
-		}
-	}
 	return &limitsChecker{limitRangeLister}, nil
 }
 

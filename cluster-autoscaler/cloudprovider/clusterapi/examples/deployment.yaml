@@ -27,7 +27,7 @@ spec:
       terminationGracePeriodSeconds: 10
       tolerations:
       - effect: NoSchedule
-        key: node-role.kubernetes.io/master
+        key: node-role.kubernetes.io/control-plane
 ---
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
@@ -108,6 +108,7 @@ rules:
     - storageclasses
     - csidrivers
     - csistoragecapacities
+    - volumeattachments
     verbs:
     - get
     - list
@@ -165,6 +166,7 @@ rules:
     - machinedeployments/scale
     - machines
     - machinesets
+    - machinepools
     verbs:
     - get
     - list

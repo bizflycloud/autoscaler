@@ -51,7 +51,7 @@ rules:
     resources: ["statefulsets", "replicasets", "daemonsets"]
     verbs: ["watch", "list", "get"]
   - apiGroups: ["storage.k8s.io"]
-    resources: ["storageclasses", "csinodes"]
+    resources: ["storageclasses", "csinodes", "csidrivers", "csistoragecapacities", "volumeattachments"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["batch"]
     resources: ["jobs", "cronjobs"]
@@ -125,7 +125,7 @@ data:
   ClientID: <base64-encoded-client-id>
   ClientSecret: <base64-encoded-client-secret>
   ResourceGroup: <base64-encoded-resource-group>
-  SubscriptionID: <base64-encode-subscription-id>
+  SubscriptionID: <base64-encoded-subscription-id>
   TenantID: <base64-encoded-tenant-id>
   Deployment: <base64-encoded-azure-initial-deploy-name>
   VMType: c3RhbmRhcmQ=
@@ -197,7 +197,7 @@ spec:
                 secretKeyRef:
                   key: Deployment
                   name: cluster-autoscaler-azure
-          image: k8s.gcr.io/cluster-autoscaler:{{ ca_version }}
+          image: registry.k8s.io/autoscaling/cluster-autoscaler:{{ ca_version }}
           imagePullPolicy: Always
           name: cluster-autoscaler
           resources:

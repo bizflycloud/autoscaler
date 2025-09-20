@@ -18,36 +18,10 @@ package ionoscloud
 
 import (
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
 )
-
-func newCacheEntry(data cloudprovider.NodeGroup, ts time.Time) nodeGroupCacheEntry {
-	return nodeGroupCacheEntry{data: data, ts: ts}
-}
-
-func TestCache_GetInstancesForNodeGroup(t *testing.T) {
-	cache := NewIonosCache()
-	cache.nodesToNodeGroups = map[string]string{
-		"node-1": "nodepool-1",
-		"node-2": "nodepool-2",
-		"node-3": "nodepool-1",
-	}
-	cache.instances = map[string]cloudprovider.Instance{
-		"node-1": {Id: convertToInstanceId("node-1")},
-		"node-2": {Id: convertToInstanceId("node-2")},
-		"node-3": {Id: convertToInstanceId("node-3")},
-	}
-
-	expect := []cloudprovider.Instance{
-		{Id: convertToInstanceId("node-1")},
-		{Id: convertToInstanceId("node-3")},
-	}
-	instances := cache.GetInstancesForNodeGroup("nodepool-1")
-	require.ElementsMatch(t, expect, instances)
-}
 
 func TestCache_AddNodeGroup(t *testing.T) {
 	cache := NewIonosCache()
@@ -57,39 +31,14 @@ func TestCache_AddNodeGroup(t *testing.T) {
 }
 
 func TestCache_RemoveInstanceFromCache(t *testing.T) {
-	firstTime := timeNow().Add(-2*time.Minute - 1*time.Second)
 	cache := NewIonosCache()
-	cache.nodeGroups["2"] = newCacheEntry(&nodePool{id: "2"}, firstTime)
+	cache.nodeGroups["2"] = &nodePool{id: "2"}
 	cache.nodesToNodeGroups["b2"] = "2"
-	cache.instances["b2"] = newInstance("b2")
 
 	require.NotNil(t, cache.GetNodeGroupForNode("b2"))
-	require.NotEmpty(t, cache.GetInstances())
-	require.True(t, cache.NodeGroupNeedsRefresh("2"))
 
 	cache.RemoveInstanceFromCache("b2")
 	require.Nil(t, cache.GetNodeGroupForNode("b2"))
-	require.Empty(t, cache.GetInstances())
-	require.False(t, cache.NodeGroupNeedsRefresh("2"))
-}
-
-func TestCache_SetInstancesCache(t *testing.T) {
-	cache := NewIonosCache()
-	cache.nodeGroups["2"] = newCacheEntry(&nodePool{id: "2"}, timeNow())
-	cache.nodesToNodeGroups["b2"] = "2"
-	cache.instances["a3"] = newInstance("b2")
-	nodePoolInstances := map[string][]cloudprovider.Instance{
-		"1": {newInstance("a1"), newInstance("a2")},
-		"2": {newInstance("b1")},
-	}
-
-	require.NotNil(t, cache.GetNodeGroupForNode("b2"))
-	cache.SetInstancesCache(nodePoolInstances)
-
-	require.Nil(t, cache.GetNodeGroupForNode("b2"))
-	require.ElementsMatch(t, []cloudprovider.Instance{
-		newInstance("a1"), newInstance("a2"), newInstance("b1"),
-	}, cache.GetInstances())
 }
 
 func TestCache_SetInstancesCacheForNodeGroup(t *testing.T) {
@@ -98,26 +47,21 @@ func TestCache_SetInstancesCacheForNodeGroup(t *testing.T) {
 	cache.AddNodeGroup(&nodePool{id: "2"})
 	cache.nodesToNodeGroups["a3"] = "1"
 	cache.nodesToNodeGroups["b1"] = "2"
-	cache.instances["a3"] = newInstance("b2")
-	cache.instances["b1"] = newInstance("b1")
 	instances := []cloudprovider.Instance{newInstance("a1"), newInstance("a2")}
 
 	require.NotNil(t, cache.GetNodeGroupForNode("a3"))
 	cache.SetInstancesCacheForNodeGroup("1", instances)
 
 	require.Nil(t, cache.GetNodeGroupForNode("a3"))
-	require.ElementsMatch(t, []cloudprovider.Instance{
-		newInstance("a1"), newInstance("a2"), newInstance("b1"),
-	}, cache.GetInstances())
 }
 
 func TestCache_GetNodeGroupIDs(t *testing.T) {
 	cache := NewIonosCache()
-	require.Empty(t, cache.GetNodeGroupIds())
+	require.Empty(t, cache.GetNodeGroupIDs())
 	cache.AddNodeGroup(&nodePool{id: "1"})
-	require.Equal(t, []string{"1"}, cache.GetNodeGroupIds())
+	require.Equal(t, []string{"1"}, cache.GetNodeGroupIDs())
 	cache.AddNodeGroup(&nodePool{id: "2"})
-	require.ElementsMatch(t, []string{"1", "2"}, cache.GetNodeGroupIds())
+	require.ElementsMatch(t, []string{"1", "2"}, cache.GetNodeGroupIDs())
 }
 
 func TestCache_GetNodeGroups(t *testing.T) {
@@ -127,18 +71,6 @@ func TestCache_GetNodeGroups(t *testing.T) {
 	require.Equal(t, []cloudprovider.NodeGroup{&nodePool{id: "1"}}, cache.GetNodeGroups())
 	cache.AddNodeGroup(&nodePool{id: "2"})
 	require.ElementsMatch(t, []*nodePool{{id: "1"}, {id: "2"}}, cache.GetNodeGroups())
-}
-
-func TestCache_GetInstances(t *testing.T) {
-	cache := NewIonosCache()
-	require.Empty(t, cache.GetInstances())
-	cache.nodesToNodeGroups["a1"] = "1"
-	cache.nodesToNodeGroups["a2"] = "1"
-	cache.instances["a1"] = newInstance("a1")
-	cache.instances["a2"] = newInstance("a2")
-	require.ElementsMatch(t, []cloudprovider.Instance{
-		newInstance("a1"), newInstance("a2"),
-	}, cache.GetInstances())
 }
 
 func TestCache_GetNodeGroupForNode(t *testing.T) {
@@ -198,23 +130,4 @@ func TestCache_GetSetNodeGroupTargetSize(t *testing.T) {
 	size, found = cache.GetNodeGroupTargetSize("1")
 	require.False(t, found)
 	require.Zero(t, size)
-}
-
-func TestCache_NodeGroupNeedsRefresh(t *testing.T) {
-	fixedTime := time.Now().Round(time.Second)
-	timeNow = func() time.Time { return fixedTime }
-	defer func() { timeNow = time.Now }()
-
-	cache := NewIonosCache()
-	require.True(t, cache.NodeGroupNeedsRefresh("test"))
-
-	cache.AddNodeGroup(&nodePool{id: "test"})
-	require.True(t, cache.NodeGroupNeedsRefresh("test"))
-	cache.SetInstancesCacheForNodeGroup("test", nil)
-	require.False(t, cache.NodeGroupNeedsRefresh("test"))
-
-	timeNow = func() time.Time { return fixedTime.Add(nodeGroupCacheEntryTimeout) }
-	require.False(t, cache.NodeGroupNeedsRefresh("test"))
-	timeNow = func() time.Time { return fixedTime.Add(nodeGroupCacheEntryTimeout + 1*time.Second) }
-	require.True(t, cache.NodeGroupNeedsRefresh("test"))
 }

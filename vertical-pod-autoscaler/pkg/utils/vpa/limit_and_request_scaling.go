@@ -31,13 +31,6 @@ type ContainerResources struct {
 	Requests core.ResourceList
 }
 
-func newContainerResources() ContainerResources {
-	return ContainerResources{
-		Requests: core.ResourceList{},
-		Limits:   core.ResourceList{},
-	}
-}
-
 // GetProportionalLimit returns limit that will be in the same proportion to recommended request as original limit had to original request.
 func GetProportionalLimit(originalLimit, originalRequest, recommendation, defaultLimit core.ResourceList) (core.ResourceList, []string) {
 	annotations := []string{}
@@ -68,11 +61,11 @@ func getProportionalResourceLimit(resourceName core.ResourceName, originalLimit,
 	}
 	// originalLimit not set, don't set limit.
 	if originalLimit == nil || originalLimit.Value() == 0 {
-		return nil, ""
+		return nil, fmt.Sprintf("%v: limit NOT set since originalLimit is nil or 0", resourceName)
 	}
 	// recommendedRequest not set, don't set limit.
 	if recommendedRequest == nil || recommendedRequest.Value() == 0 {
-		return nil, ""
+		return nil, fmt.Sprintf("%v: limit NOT set since recommendedRequest is nil or 0", resourceName)
 	}
 	// originalLimit set but originalRequest not set - K8s will treat the pod as if they were equal,
 	// recommend limit equal to request
@@ -178,4 +171,18 @@ func scaleQuantityProportionallyMem(scaledQuantity, scaleBase, scaleResult *reso
 		return result, false
 	}
 	return resource.NewQuantity(math.MaxInt64, scaledQuantity.Format), true
+}
+
+// RemoveEmptyResourceKeyIfAny ensure that we are not pushing a resource with an empty key. Return true if an empty key was eliminated
+func (cr *ContainerResources) RemoveEmptyResourceKeyIfAny() bool {
+	var found bool
+	if _, foundEmptyKey := cr.Limits[""]; foundEmptyKey {
+		delete(cr.Limits, "")
+		found = true
+	}
+	if _, foundEmptyKey := cr.Requests[""]; foundEmptyKey {
+		delete(cr.Requests, "")
+		found = true
+	}
+	return found
 }

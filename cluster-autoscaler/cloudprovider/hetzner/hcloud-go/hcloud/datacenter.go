@@ -1,19 +1,3 @@
-/*
-Copyright 2018 The Kubernetes Authors.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package hcloud
 
 import (
@@ -22,12 +6,13 @@ import (
 	"net/url"
 	"strconv"
 
+	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/hetzner/hcloud-go/hcloud/exp/ctxutil"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/hetzner/hcloud-go/hcloud/schema"
 )
 
 // Datacenter represents a datacenter in the Hetzner Cloud.
 type Datacenter struct {
-	ID          int
+	ID          int64
 	Name        string
 	Description string
 	Location    *Location
@@ -36,8 +21,9 @@ type Datacenter struct {
 
 // DatacenterServerTypes represents the server types available and supported in a datacenter.
 type DatacenterServerTypes struct {
-	Supported []*ServerType
-	Available []*ServerType
+	Supported             []*ServerType
+	AvailableForMigration []*ServerType
+	Available             []*ServerType
 }
 
 // DatacenterClient is a client for the datacenter API.
@@ -46,40 +32,35 @@ type DatacenterClient struct {
 }
 
 // GetByID retrieves a datacenter by its ID. If the datacenter does not exist, nil is returned.
-func (c *DatacenterClient) GetByID(ctx context.Context, id int) (*Datacenter, *Response, error) {
-	req, err := c.client.NewRequest(ctx, "GET", fmt.Sprintf("/datacenters/%d", id), nil)
-	if err != nil {
-		return nil, nil, err
-	}
+func (c *DatacenterClient) GetByID(ctx context.Context, id int64) (*Datacenter, *Response, error) {
+	const opPath = "/datacenters/%d"
+	ctx = ctxutil.SetOpPath(ctx, opPath)
 
-	var body schema.DatacenterGetResponse
-	resp, err := c.client.Do(req, &body)
+	reqPath := fmt.Sprintf(opPath, id)
+
+	respBody, resp, err := getRequest[schema.DatacenterGetResponse](ctx, c.client, reqPath)
 	if err != nil {
 		if IsError(err, ErrorCodeNotFound) {
 			return nil, resp, nil
 		}
 		return nil, resp, err
 	}
-	return DatacenterFromSchema(body.Datacenter), resp, nil
+
+	return DatacenterFromSchema(respBody.Datacenter), resp, nil
 }
 
-// GetByName retrieves an datacenter by its name. If the datacenter does not exist, nil is returned.
+// GetByName retrieves a datacenter by its name. If the datacenter does not exist, nil is returned.
 func (c *DatacenterClient) GetByName(ctx context.Context, name string) (*Datacenter, *Response, error) {
-	if name == "" {
-		return nil, nil, nil
-	}
-	datacenters, response, err := c.List(ctx, DatacenterListOpts{Name: name})
-	if len(datacenters) == 0 {
-		return nil, response, err
-	}
-	return datacenters[0], response, err
+	return firstByName(name, func() ([]*Datacenter, *Response, error) {
+		return c.List(ctx, DatacenterListOpts{Name: name})
+	})
 }
 
 // Get retrieves a datacenter by its ID if the input can be parsed as an integer, otherwise it
 // retrieves a datacenter by its name. If the datacenter does not exist, nil is returned.
 func (c *DatacenterClient) Get(ctx context.Context, idOrName string) (*Datacenter, *Response, error) {
-	if id, err := strconv.Atoi(idOrName); err == nil {
-		return c.GetByID(ctx, int(id))
+	if id, err := strconv.ParseInt(idOrName, 10, 64); err == nil {
+		return c.GetByID(ctx, id)
 	}
 	return c.GetByName(ctx, idOrName)
 }
@@ -88,12 +69,16 @@ func (c *DatacenterClient) Get(ctx context.Context, idOrName string) (*Datacente
 type DatacenterListOpts struct {
 	ListOpts
 	Name string
+	Sort []string
 }
 
 func (l DatacenterListOpts) values() url.Values {
-	vals := l.ListOpts.values()
+	vals := l.ListOpts.Values()
 	if l.Name != "" {
 		vals.Add("name", l.Name)
+	}
+	for _, sort := range l.Sort {
+		vals.Add("sort", sort)
 	}
 	return vals
 }
@@ -103,43 +88,28 @@ func (l DatacenterListOpts) values() url.Values {
 // Please note that filters specified in opts are not taken into account
 // when their value corresponds to their zero value or when they are empty.
 func (c *DatacenterClient) List(ctx context.Context, opts DatacenterListOpts) ([]*Datacenter, *Response, error) {
-	path := "/datacenters?" + opts.values().Encode()
-	req, err := c.client.NewRequest(ctx, "GET", path, nil)
+	const opPath = "/datacenters?%s"
+	ctx = ctxutil.SetOpPath(ctx, opPath)
+
+	reqPath := fmt.Sprintf(opPath, opts.values().Encode())
+
+	respBody, resp, err := getRequest[schema.DatacenterListResponse](ctx, c.client, reqPath)
 	if err != nil {
-		return nil, nil, err
+		return nil, resp, err
 	}
 
-	var body schema.DatacenterListResponse
-	resp, err := c.client.Do(req, &body)
-	if err != nil {
-		return nil, nil, err
-	}
-	datacenters := make([]*Datacenter, 0, len(body.Datacenters))
-	for _, i := range body.Datacenters {
-		datacenters = append(datacenters, DatacenterFromSchema(i))
-	}
-	return datacenters, resp, nil
+	return allFromSchemaFunc(respBody.Datacenters, DatacenterFromSchema), resp, nil
 }
 
 // All returns all datacenters.
 func (c *DatacenterClient) All(ctx context.Context) ([]*Datacenter, error) {
-	allDatacenters := []*Datacenter{}
+	return c.AllWithOpts(ctx, DatacenterListOpts{ListOpts: ListOpts{PerPage: 50}})
+}
 
-	opts := DatacenterListOpts{}
-	opts.PerPage = 50
-
-	_, err := c.client.all(func(page int) (*Response, error) {
+// AllWithOpts returns all datacenters for the given options.
+func (c *DatacenterClient) AllWithOpts(ctx context.Context, opts DatacenterListOpts) ([]*Datacenter, error) {
+	return iterPages(func(page int) ([]*Datacenter, *Response, error) {
 		opts.Page = page
-		datacenters, resp, err := c.List(ctx, opts)
-		if err != nil {
-			return resp, err
-		}
-		allDatacenters = append(allDatacenters, datacenters...)
-		return resp, nil
+		return c.List(ctx, opts)
 	})
-	if err != nil {
-		return nil, err
-	}
-
-	return allDatacenters, nil
 }

@@ -19,9 +19,14 @@ package recommender
 
 import (
 	"fmt"
+	"net/http"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	vpa_types "k8s.io/autoscaler/vertical-pod-autoscaler/pkg/apis/autoscaling.k8s.io/v1"
 	"k8s.io/autoscaler/vertical-pod-autoscaler/pkg/recommender/model"
 	"k8s.io/autoscaler/vertical-pod-autoscaler/pkg/utils/metrics"
@@ -32,7 +37,14 @@ const (
 )
 
 var (
-	modes = []string{string(vpa_types.UpdateModeOff), string(vpa_types.UpdateModeInitial), string(vpa_types.UpdateModeRecreate), string(vpa_types.UpdateModeAuto)}
+	// TODO: unify this list with the types defined in the VPA handler to avoid
+	// drift if one file is changed and the other one is missed.
+	modes = []string{
+		string(vpa_types.UpdateModeOff),
+		string(vpa_types.UpdateModeInitial),
+		string(vpa_types.UpdateModeRecreate),
+		string(vpa_types.UpdateModeAuto),
+	}
 )
 
 type apiVersion string
@@ -71,6 +83,31 @@ var (
 			Help:      "Number of aggregate container states being tracked by the recommender",
 		},
 	)
+
+	metricServerResponses = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Name:      "metric_server_responses",
+			Help:      "Count of responses to queries to metrics server",
+		}, []string{"is_error", "client_name"},
+	)
+
+	prometheusClientRequestsCount = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Name:      "prometheus_client_api_requests_count",
+			Help:      "Number of requests to a Prometheus API",
+		}, []string{"code", "method"},
+	)
+
+	prometheusClientRequestsDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: metricsNamespace,
+			Name:      "prometheus_client_api_requests_duration_seconds",
+			Help:      "Duration of requests to a Prometheus API",
+			Buckets:   []float64{0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0, 300.0},
+		}, []string{"code", "method"},
+	)
 )
 
 type objectCounterKey struct {
@@ -83,12 +120,13 @@ type objectCounterKey struct {
 
 // ObjectCounter helps split all VPA objects into buckets
 type ObjectCounter struct {
-	cnt map[objectCounterKey]int
+	cnt   map[objectCounterKey]int
+	mutex sync.RWMutex
 }
 
 // Register initializes all metrics for VPA Recommender
 func Register() {
-	prometheus.MustRegister(vpaObjectCount, recommendationLatency, functionLatency, aggregateContainerStatesCount)
+	prometheus.MustRegister(vpaObjectCount, recommendationLatency, functionLatency, aggregateContainerStatesCount, metricServerResponses, prometheusClientRequestsCount, prometheusClientRequestsDuration)
 }
 
 // NewExecutionTimer provides a timer for Recommender's RunOnce execution
@@ -98,12 +136,17 @@ func NewExecutionTimer() *metrics.ExecutionTimer {
 
 // ObserveRecommendationLatency observes the time it took for the first recommendation to appear
 func ObserveRecommendationLatency(created time.Time) {
-	recommendationLatency.Observe(time.Now().Sub(created).Seconds())
+	recommendationLatency.Observe(time.Since(created).Seconds())
 }
 
 // RecordAggregateContainerStatesCount records the number of containers being tracked by the recommender
 func RecordAggregateContainerStatesCount(statesCount int) {
 	aggregateContainerStatesCount.Set(float64(statesCount))
+}
+
+// RecordMetricsServerResponse records result of a query to metrics server
+func RecordMetricsServerResponse(err error, clientName string) {
+	metricServerResponses.WithLabelValues(strconv.FormatBool(err != nil), clientName).Inc()
 }
 
 // NewObjectCounter creates a new helper to split VPA objects into buckets
@@ -136,28 +179,27 @@ func NewObjectCounter() *ObjectCounter {
 
 // Add updates the helper state to include the given VPA object
 func (oc *ObjectCounter) Add(vpa *model.Vpa) {
-	mode := string(vpa_types.UpdateModeAuto)
+	mode := vpa_types.UpdateModeAuto
 	if vpa.UpdateMode != nil && string(*vpa.UpdateMode) != "" {
-		mode = string(*vpa.UpdateMode)
-	}
-	// TODO: Maybe report v1 version as well.
-	api := v1beta2
-	if vpa.IsV1Beta1API {
-		api = v1beta1
+		mode = *vpa.UpdateMode
 	}
 
 	key := objectCounterKey{
-		mode:              mode,
+		mode:              string(mode),
 		has:               vpa.HasRecommendation(),
-		apiVersion:        api,
+		apiVersion:        apiVersion(vpa.APIVersion),
 		matchesPods:       vpa.HasMatchedPods(),
 		unsupportedConfig: vpa.Conditions.ConditionActive(vpa_types.ConfigUnsupported),
 	}
+	oc.mutex.Lock()
 	oc.cnt[key]++
+	oc.mutex.Unlock()
 }
 
 // Observe passes all the computed bucket values to metrics
 func (oc *ObjectCounter) Observe() {
+	oc.mutex.RLock()
+	defer oc.mutex.RUnlock()
 	for k, v := range oc.cnt {
 		vpaObjectCount.WithLabelValues(
 			k.mode,
@@ -167,4 +209,14 @@ func (oc *ObjectCounter) Observe() {
 			fmt.Sprintf("%v", k.unsupportedConfig),
 		).Set(float64(v))
 	}
+}
+
+// NewPrometheusRoundTripperCounter creates a RoundTripper that counts Prometheus client API requests
+func NewPrometheusRoundTripperCounter(roundTripper http.RoundTripper) promhttp.RoundTripperFunc {
+	return promhttp.InstrumentRoundTripperCounter(prometheusClientRequestsCount, roundTripper)
+}
+
+// NewPrometheusRoundTripperDuration creates a RoundTripper that measures Prometheus client API requests duration
+func NewPrometheusRoundTripperDuration(roundTripper http.RoundTripper) promhttp.RoundTripperFunc {
+	return promhttp.InstrumentRoundTripperDuration(prometheusClientRequestsDuration, roundTripper)
 }

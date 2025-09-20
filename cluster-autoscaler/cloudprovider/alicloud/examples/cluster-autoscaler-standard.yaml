@@ -45,7 +45,7 @@ rules:
   resources: ["statefulsets", "replicasets", "daemonsets"]
   verbs: ["watch","list","get"]
 - apiGroups: ["storage.k8s.io"]
-  resources: ["storageclasses"]
+  resources: ["storageclasses", "csinodes", "csidrivers", "csistoragecapacities"]
   verbs: ["watch","list","get"]
 
 ---
@@ -109,7 +109,7 @@ metadata:
 type: Opaque
 data:
   access-key-id: [YOUR_BASE64_AK_ID]
-  access-key-id: [YOUR_BASE64_AK_SECRET]
+  access-key-secret: [YOUR_BASE64_AK_SECRET]
   region-id: [YOUR_BASE64_REGION_ID]
 
 ---
@@ -131,7 +131,7 @@ spec:
         app: cluster-autoscaler
     spec:
       priorityClassName: system-cluster-critical
-      serviceAccountName: admin
+      serviceAccountName: cluster-autoscaler
       containers:
         - image: registry.cn-hangzhou.aliyuncs.com/acs/autoscaler:v1.3.1
           name: cluster-autoscaler
@@ -162,9 +162,9 @@ spec:
                 key: access-key-secret
           - name: REGION_ID
             valueFrom:
-            secretKeyRef:
-              name: cloud-config
-              key: region-id
+              secretKeyRef:
+                name: cloud-config
+                key: region-id
           volumeMounts:
             - name: ssl-certs
               mountPath: /etc/ssl/certs/ca-certificates.crt

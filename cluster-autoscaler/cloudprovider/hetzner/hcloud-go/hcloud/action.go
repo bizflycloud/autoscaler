@@ -1,19 +1,3 @@
-/*
-Copyright 2018 The Kubernetes Authors.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package hcloud
 
 import (
@@ -22,12 +6,13 @@ import (
 	"net/url"
 	"time"
 
+	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/hetzner/hcloud-go/hcloud/exp/ctxutil"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/hetzner/hcloud-go/hcloud/schema"
 )
 
 // Action represents an action in the Hetzner Cloud.
 type Action struct {
-	ID           int
+	ID           int64
 	Status       ActionStatus
 	Command      string
 	Progress     int
@@ -50,7 +35,7 @@ const (
 
 // ActionResource references other resources from an action.
 type ActionResource struct {
-	ID   int
+	ID   int64
 	Type ActionResourceType
 }
 
@@ -70,9 +55,21 @@ const (
 type ActionError struct {
 	Code    string
 	Message string
+
+	action *Action
+}
+
+// Action returns the [Action] that triggered the error if available.
+func (e ActionError) Action() *Action {
+	return e.action
 }
 
 func (e ActionError) Error() string {
+	action := e.Action()
+	if action != nil {
+		// For easier debugging, the error string contains the Action ID.
+		return fmt.Sprintf("%s (%s, %d)", e.Message, e.Code, action.ID)
+	}
 	return fmt.Sprintf("%s (%s)", e.Message, e.Code)
 }
 
@@ -81,6 +78,7 @@ func (a *Action) Error() error {
 		return ActionError{
 			Code:    a.ErrorCode,
 			Message: a.ErrorMessage,
+			action:  a,
 		}
 	}
 	return nil
@@ -88,36 +86,27 @@ func (a *Action) Error() error {
 
 // ActionClient is a client for the actions API.
 type ActionClient struct {
-	client *Client
+	action *ResourceActionClient
 }
 
 // GetByID retrieves an action by its ID. If the action does not exist, nil is returned.
-func (c *ActionClient) GetByID(ctx context.Context, id int) (*Action, *Response, error) {
-	req, err := c.client.NewRequest(ctx, "GET", fmt.Sprintf("/actions/%d", id), nil)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	var body schema.ActionGetResponse
-	resp, err := c.client.Do(req, &body)
-	if err != nil {
-		if IsError(err, ErrorCodeNotFound) {
-			return nil, resp, nil
-		}
-		return nil, nil, err
-	}
-	return ActionFromSchema(body.Action), resp, nil
+func (c *ActionClient) GetByID(ctx context.Context, id int64) (*Action, *Response, error) {
+	return c.action.GetByID(ctx, id)
 }
 
 // ActionListOpts specifies options for listing actions.
 type ActionListOpts struct {
 	ListOpts
+	ID     []int64
 	Status []ActionStatus
 	Sort   []string
 }
 
 func (l ActionListOpts) values() url.Values {
-	vals := l.ListOpts.values()
+	vals := l.ListOpts.Values()
+	for _, id := range l.ID {
+		vals.Add("id", fmt.Sprintf("%d", id))
+	}
 	for _, status := range l.Status {
 		vals.Add("status", string(status))
 	}
@@ -132,95 +121,76 @@ func (l ActionListOpts) values() url.Values {
 // Please note that filters specified in opts are not taken into account
 // when their value corresponds to their zero value or when they are empty.
 func (c *ActionClient) List(ctx context.Context, opts ActionListOpts) ([]*Action, *Response, error) {
-	path := "/actions?" + opts.values().Encode()
-	req, err := c.client.NewRequest(ctx, "GET", path, nil)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	var body schema.ActionListResponse
-	resp, err := c.client.Do(req, &body)
-	if err != nil {
-		return nil, nil, err
-	}
-	actions := make([]*Action, 0, len(body.Actions))
-	for _, i := range body.Actions {
-		actions = append(actions, ActionFromSchema(i))
-	}
-	return actions, resp, nil
+	return c.action.List(ctx, opts)
 }
 
 // All returns all actions.
+//
+// Deprecated: It is required to pass in a list of IDs since 30 January 2025. Please use [ActionClient.AllWithOpts] instead.
 func (c *ActionClient) All(ctx context.Context) ([]*Action, error) {
-	allActions := []*Action{}
-
-	opts := ActionListOpts{}
-	opts.PerPage = 50
-
-	_, err := c.client.all(func(page int) (*Response, error) {
-		opts.Page = page
-		actions, resp, err := c.List(ctx, opts)
-		if err != nil {
-			return resp, err
-		}
-		allActions = append(allActions, actions...)
-		return resp, nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return allActions, nil
+	return c.action.All(ctx, ActionListOpts{ListOpts: ListOpts{PerPage: 50}})
 }
 
-// WatchProgress watches the action's progress until it completes with success or error.
-func (c *ActionClient) WatchProgress(ctx context.Context, action *Action) (<-chan int, <-chan error) {
-	errCh := make(chan error, 1)
-	progressCh := make(chan int)
+// AllWithOpts returns all actions for the given options.
+//
+// It is required to set [ActionListOpts.ID]. Any other fields set in the opts are ignored.
+func (c *ActionClient) AllWithOpts(ctx context.Context, opts ActionListOpts) ([]*Action, error) {
+	return c.action.All(ctx, opts)
+}
 
-	go func() {
-		defer close(errCh)
-		defer close(progressCh)
+// ResourceActionClient is a client for the actions API exposed by the resource.
+type ResourceActionClient struct {
+	resource string
+	client   *Client
+}
 
-		ticker := time.NewTicker(c.client.pollInterval)
-		sendProgress := func(p int) {
-			select {
-			case progressCh <- p:
-				break
-			default:
-				break
-			}
+func (c *ResourceActionClient) getBaseURL() string {
+	if c.resource == "" {
+		return ""
+	}
+
+	return "/" + c.resource
+}
+
+// GetByID retrieves an action by its ID. If the action does not exist, nil is returned.
+func (c *ResourceActionClient) GetByID(ctx context.Context, id int64) (*Action, *Response, error) {
+	opPath := c.getBaseURL() + "/actions/%d"
+	ctx = ctxutil.SetOpPath(ctx, opPath)
+
+	reqPath := fmt.Sprintf(opPath, id)
+
+	respBody, resp, err := getRequest[schema.ActionGetResponse](ctx, c.client, reqPath)
+	if err != nil {
+		if IsError(err, ErrorCodeNotFound) {
+			return nil, resp, nil
 		}
+		return nil, resp, err
+	}
+	return ActionFromSchema(respBody.Action), resp, nil
+}
 
-		for {
-			select {
-			case <-ctx.Done():
-				errCh <- ctx.Err()
-				return
-			case <-ticker.C:
-				break
-			}
+// List returns a list of actions for a specific page.
+//
+// Please note that filters specified in opts are not taken into account
+// when their value corresponds to their zero value or when they are empty.
+func (c *ResourceActionClient) List(ctx context.Context, opts ActionListOpts) ([]*Action, *Response, error) {
+	opPath := c.getBaseURL() + "/actions?%s"
+	ctx = ctxutil.SetOpPath(ctx, opPath)
 
-			a, _, err := c.GetByID(ctx, action.ID)
-			if err != nil {
-				errCh <- err
-				return
-			}
+	reqPath := fmt.Sprintf(opPath, opts.values().Encode())
 
-			switch a.Status {
-			case ActionStatusRunning:
-				sendProgress(a.Progress)
-				break
-			case ActionStatusSuccess:
-				sendProgress(100)
-				errCh <- nil
-				return
-			case ActionStatusError:
-				errCh <- a.Error()
-				return
-			}
-		}
-	}()
+	respBody, resp, err := getRequest[schema.ActionListResponse](ctx, c.client, reqPath)
+	if err != nil {
+		return nil, resp, err
+	}
 
-	return progressCh, errCh
+	return allFromSchemaFunc(respBody.Actions, ActionFromSchema), resp, nil
+}
+
+// All returns all actions for the given options.
+func (c *ResourceActionClient) All(ctx context.Context, opts ActionListOpts) ([]*Action, error) {
+	return iterPages(func(page int) ([]*Action, *Response, error) {
+		opts.Page = page
+		return c.List(ctx, opts)
+	})
 }

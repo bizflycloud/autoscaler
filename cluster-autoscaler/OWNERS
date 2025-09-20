@@ -1,8 +1,15 @@
 approvers:
 - aleksandra-malinowska
+- BigDarkClown
 - feiskyer
 - towca
+- x13n
 reviewers:
 - aleksandra-malinowska
+- BigDarkClown
 - feiskyer
-- Jeffwan
+- vadasambar
+- x13n
+- elmiko
+labels:
+- area/cluster-autoscaler

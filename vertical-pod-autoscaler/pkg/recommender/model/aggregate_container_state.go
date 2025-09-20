@@ -37,11 +37,12 @@ package model
 
 import (
 	"fmt"
-	"math"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	vpa_types "k8s.io/autoscaler/vertical-pod-autoscaler/pkg/apis/autoscaling.k8s.io/v1"
 	"k8s.io/autoscaler/vertical-pod-autoscaler/pkg/recommender/util"
 )
@@ -105,16 +106,27 @@ type AggregateContainerState struct {
 	// we want to know if it needs recommendation, if the recommendation
 	// is present and if the automatic updates are on (are we able to
 	// apply the recommendation to the pods).
-	LastRecommendation  corev1.ResourceList
+	lastRecommendation  corev1.ResourceList
 	IsUnderVPA          bool
 	UpdateMode          *vpa_types.UpdateMode
 	ScalingMode         *vpa_types.ContainerScalingMode
 	ControlledResources *[]ResourceName
+
+	mutex sync.RWMutex
 }
 
-// GetLastRecommendation returns last recorded recommendation.
+// GetLastRecommendation returns last recorded recommendation in a thread-safe manner.
 func (a *AggregateContainerState) GetLastRecommendation() corev1.ResourceList {
-	return a.LastRecommendation
+	a.mutex.RLock()
+	defer a.mutex.RUnlock()
+	return a.lastRecommendation
+}
+
+// SetLastRecommendation sets the last recorded recommendation in a thread-safe manner.
+func (a *AggregateContainerState) SetLastRecommendation(recommendation corev1.ResourceList) {
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+	a.lastRecommendation = recommendation
 }
 
 // NeedsRecommendation returns true if the state should have recommendation calculated.
@@ -147,7 +159,7 @@ func (a *AggregateContainerState) GetControlledResources() []ResourceName {
 // a VPA object.
 func (a *AggregateContainerState) MarkNotAutoscaled() {
 	a.IsUnderVPA = false
-	a.LastRecommendation = nil
+	a.SetLastRecommendation(nil)
 	a.UpdateMode = nil
 	a.ScalingMode = nil
 	a.ControlledResources = nil
@@ -206,12 +218,8 @@ func (a *AggregateContainerState) SubtractSample(sample *ContainerUsageSample) {
 
 func (a *AggregateContainerState) addCPUSample(sample *ContainerUsageSample) {
 	cpuUsageCores := CoresFromCPUAmount(sample.Usage)
-	cpuRequestCores := CoresFromCPUAmount(sample.Request)
-	// Samples are added with the weight equal to the current request. This means that
-	// whenever the request is increased, the history accumulated so far effectively decays,
-	// which helps react quickly to CPU starvation.
 	a.AggregateCPUUsage.AddSample(
-		cpuUsageCores, math.Max(cpuRequestCores, minSampleWeight), sample.MeasureStart)
+		cpuUsageCores, minSampleWeight, sample.MeasureStart)
 	if sample.MeasureStart.After(a.LastSampleStart) {
 		a.LastSampleStart = sample.MeasureStart
 	}
@@ -247,7 +255,7 @@ func (a *AggregateContainerState) SaveToCheckpoint() (*vpa_types.VerticalPodAuto
 // into the AggregateContainerState.
 func (a *AggregateContainerState) LoadFromCheckpoint(checkpoint *vpa_types.VerticalPodAutoscalerCheckpointStatus) error {
 	if checkpoint.Version != SupportedCheckpointVersion {
-		return fmt.Errorf("unsuported checkpoint version %s", checkpoint.Version)
+		return fmt.Errorf("unsupported checkpoint version %s", checkpoint.Version)
 	}
 	a.TotalSamplesCount = checkpoint.TotalSamplesCount
 	a.FirstSampleStart = checkpoint.FirstSampleStart.Time
@@ -311,12 +319,12 @@ func AggregateStateByContainerName(aggregateContainerStateMap aggregateContainer
 // present in the cluster state.
 type ContainerStateAggregatorProxy struct {
 	containerID ContainerID
-	cluster     *ClusterState
+	cluster     *clusterState
 }
 
 // NewContainerStateAggregatorProxy creates a ContainerStateAggregatorProxy
 // pointing to the cluster state.
-func NewContainerStateAggregatorProxy(cluster *ClusterState, containerID ContainerID) ContainerStateAggregator {
+func NewContainerStateAggregatorProxy(cluster *clusterState, containerID ContainerID) ContainerStateAggregator {
 	return &ContainerStateAggregatorProxy{containerID, cluster}
 }
 

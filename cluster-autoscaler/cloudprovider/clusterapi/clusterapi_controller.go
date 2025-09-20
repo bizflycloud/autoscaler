@@ -19,6 +19,7 @@ package clusterapi
 import (
 	"fmt"
 	"os"
+	"path"
 	"strings"
 	"sync"
 
@@ -42,24 +43,32 @@ import (
 )
 
 const (
-	machineProviderIDIndex = "machineProviderIDIndex"
-	nodeProviderIDIndex    = "nodeProviderIDIndex"
-	defaultCAPIGroup       = "cluster.x-k8s.io"
+	machineProviderIDIndex     = "machineProviderIDIndex"
+	machinePoolProviderIDIndex = "machinePoolProviderIDIndex"
+	nodeProviderIDIndex        = "nodeProviderIDIndex"
+	defaultCAPIGroup           = "cluster.x-k8s.io"
 	// CAPIGroupEnvVar contains the environment variable name which allows overriding defaultCAPIGroup.
-	CAPIGroupEnvVar               = "CAPI_GROUP"
+	CAPIGroupEnvVar = "CAPI_GROUP"
+	// CAPIVersionEnvVar contains the environment variable name which allows overriding the Cluster API group version.
+	CAPIVersionEnvVar             = "CAPI_VERSION"
 	resourceNameMachine           = "machines"
 	resourceNameMachineSet        = "machinesets"
 	resourceNameMachineDeployment = "machinedeployments"
+	resourceNameMachinePool       = "machinepools"
+	deletingMachinePrefix         = "deleting-machine-"
 	failedMachinePrefix           = "failed-machine-"
+	pendingMachinePrefix          = "pending-machine-"
+	machineTemplateKind           = "MachineTemplate"
 	machineDeploymentKind         = "MachineDeployment"
 	machineSetKind                = "MachineSet"
+	machinePoolKind               = "MachinePool"
 	machineKind                   = "Machine"
 	autoDiscovererTypeClusterAPI  = "clusterapi"
 	autoDiscovererClusterNameKey  = "clusterName"
 	autoDiscovererNamespaceKey    = "namespace"
 )
 
-// machineController watches for Nodes, Machines, MachineSets and
+// machineController watches for Nodes, Machines, MachinePools, MachineSets, and
 // MachineDeployments as they are added, updated and deleted on the
 // cluster. Additionally, it adds indices to the node informers to
 // satisfy lookup by node.Spec.ProviderID.
@@ -69,15 +78,46 @@ type machineController struct {
 	machineDeploymentInformer   informers.GenericInformer
 	machineInformer             informers.GenericInformer
 	machineSetInformer          informers.GenericInformer
+	machinePoolInformer         informers.GenericInformer
 	nodeInformer                cache.SharedIndexInformer
 	managementClient            dynamic.Interface
 	managementScaleClient       scale.ScalesGetter
+	managementDiscoveryClient   discovery.DiscoveryInterface
 	machineSetResource          schema.GroupVersionResource
 	machineResource             schema.GroupVersionResource
+	machinePoolResource         schema.GroupVersionResource
+	machinePoolsAvailable       bool
 	machineDeploymentResource   schema.GroupVersionResource
 	machineDeploymentsAvailable bool
 	accessLock                  sync.Mutex
 	autoDiscoverySpecs          []*clusterAPIAutoDiscoveryConfig
+	// stopChannel is used for running the shared informers, and for starting
+	// informers associated with infrastructure machine templates that are
+	// discovered during operation.
+	stopChannel <-chan struct{}
+}
+
+func indexMachinePoolByProviderID(obj interface{}) ([]string, error) {
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return nil, nil
+	}
+
+	providerIDList, found, err := unstructured.NestedStringSlice(u.UnstructuredContent(), "spec", "providerIDList")
+	if err != nil || !found {
+		return nil, nil
+	}
+	if len(providerIDList) == 0 {
+		return nil, nil
+	}
+
+	normalizedProviderIDs := make([]string, len(providerIDList))
+
+	for i, s := range providerIDList {
+		normalizedProviderIDs[i] = string(normalizedProviderString(s))
+	}
+
+	return normalizedProviderIDs, nil
 }
 
 func indexMachineByProviderID(obj interface{}) ([]string, error) {
@@ -107,6 +147,7 @@ func indexNodeByProviderID(obj interface{}) ([]string, error) {
 	return []string{}, nil
 }
 
+// findMachine looks up a machine by the ID which is stored in the index as <namespace>/<name>.
 func (c *machineController) findMachine(id string) (*unstructured.Unstructured, error) {
 	return c.findResourceByKey(c.machineInformer.Informer().GetStore(), id)
 }
@@ -168,9 +209,9 @@ func (c *machineController) findMachineSetOwner(machineSet *unstructured.Unstruc
 
 // run starts shared informers and waits for the informer cache to
 // synchronize.
-func (c *machineController) run(stopCh <-chan struct{}) error {
-	c.workloadInformerFactory.Start(stopCh)
-	c.managementInformerFactory.Start(stopCh)
+func (c *machineController) run() error {
+	c.workloadInformerFactory.Start(c.stopChannel)
+	c.managementInformerFactory.Start(c.stopChannel)
 
 	syncFuncs := []cache.InformerSynced{
 		c.nodeInformer.HasSynced,
@@ -180,9 +221,12 @@ func (c *machineController) run(stopCh <-chan struct{}) error {
 	if c.machineDeploymentsAvailable {
 		syncFuncs = append(syncFuncs, c.machineDeploymentInformer.Informer().HasSynced)
 	}
+	if c.machinePoolsAvailable {
+		syncFuncs = append(syncFuncs, c.machinePoolInformer.Informer().HasSynced)
+	}
 
 	klog.V(4).Infof("waiting for caches to sync")
-	if !cache.WaitForCacheSync(stopCh, syncFuncs...) {
+	if !cache.WaitForCacheSync(c.stopChannel, syncFuncs...) {
 		return fmt.Errorf("syncing caches failed")
 	}
 
@@ -190,37 +234,67 @@ func (c *machineController) run(stopCh <-chan struct{}) error {
 }
 
 func (c *machineController) findScalableResourceByProviderID(providerID normalizedProviderID) (*unstructured.Unstructured, error) {
+	// Check for a MachinePool first to simplify the logic afterward.
+	if c.machinePoolsAvailable {
+		machinePool, err := c.findMachinePoolByProviderID(providerID)
+		if err != nil {
+			return nil, err
+		}
+		if machinePool != nil {
+			return machinePool, nil
+		}
+	}
+
+	// Check for a MachineSet.
 	machine, err := c.findMachineByProviderID(providerID)
 	if err != nil {
 		return nil, err
 	}
-
 	if machine == nil {
 		return nil, nil
 	}
-
 	machineSet, err := c.findMachineOwner(machine)
 	if err != nil {
 		return nil, err
 	}
-
 	if machineSet == nil {
 		return nil, nil
 	}
 
+	// Check for a MachineDeployment.
 	if c.machineDeploymentsAvailable {
 		machineDeployment, err := c.findMachineSetOwner(machineSet)
 		if err != nil {
 			return nil, err
 		}
-
-		// If a matching machineDeployment was found return it
 		if machineDeployment != nil {
 			return machineDeployment, nil
 		}
 	}
 
 	return machineSet, nil
+}
+
+// findMachinePoolByProviderID finds machine pools matching providerID. A
+// DeepCopy() of the object is returned on success.
+func (c *machineController) findMachinePoolByProviderID(providerID normalizedProviderID) (*unstructured.Unstructured, error) {
+	objs, err := c.machinePoolInformer.Informer().GetIndexer().ByIndex(machinePoolProviderIDIndex, string(providerID))
+	if err != nil {
+		return nil, err
+	}
+
+	switch n := len(objs); {
+	case n > 1:
+		return nil, fmt.Errorf("internal error; expected len==1, got %v", n)
+	case n == 1:
+		u, ok := objs[0].(*unstructured.Unstructured)
+		if !ok {
+			return nil, fmt.Errorf("internal error; unexpected type %T", objs[0])
+		}
+		return u.DeepCopy(), nil
+	default:
+		return nil, nil
+	}
 }
 
 // findMachineByProviderID finds machine matching providerID. A
@@ -242,8 +316,14 @@ func (c *machineController) findMachineByProviderID(providerID normalizedProvide
 		return u.DeepCopy(), nil
 	}
 
+	if isDeletingMachineProviderID(providerID) {
+		return c.findMachine(machineKeyFromDeletingMachineProviderID(providerID))
+	}
 	if isFailedMachineProviderID(providerID) {
 		return c.findMachine(machineKeyFromFailedProviderID(providerID))
+	}
+	if isPendingMachineProviderID(providerID) {
+		return c.findMachine(machineKeyFromPendingMachineProviderID(providerID))
 	}
 
 	// If the machine object has no providerID--maybe actuator
@@ -259,8 +339,40 @@ func (c *machineController) findMachineByProviderID(providerID normalizedProvide
 		return nil, nil
 	}
 
-	machineID, _ := node.Annotations[machineAnnotationKey]
-	return c.findMachine(machineID)
+	machineID := node.Annotations[machineAnnotationKey]
+	ns := node.Annotations[clusterNamespaceAnnotationKey]
+	return c.findMachine(path.Join(ns, machineID))
+}
+
+func createDeletingMachineNormalizedProviderID(namespace, name string) string {
+	return fmt.Sprintf("%s%s_%s", deletingMachinePrefix, namespace, name)
+}
+
+func isDeletingMachineProviderID(providerID normalizedProviderID) bool {
+	return strings.HasPrefix(string(providerID), deletingMachinePrefix)
+}
+
+func machineKeyFromDeletingMachineProviderID(providerID normalizedProviderID) string {
+	namespaceName := strings.TrimPrefix(string(providerID), deletingMachinePrefix)
+	return strings.Replace(namespaceName, "_", "/", 1)
+}
+
+// createPendingMachineProviderID creates a providerID for a machine that is pending
+func createPendingMachineProviderID(namespace, name string) string {
+	return fmt.Sprintf("%s%s_%s", pendingMachinePrefix, namespace, name)
+}
+
+func isPendingMachineProviderID(providerID normalizedProviderID) bool {
+	return strings.HasPrefix(string(providerID), pendingMachinePrefix)
+}
+
+func machineKeyFromPendingMachineProviderID(providerID normalizedProviderID) string {
+	namespaceName := strings.TrimPrefix(string(providerID), pendingMachinePrefix)
+	return strings.Replace(namespaceName, "_", "/", 1)
+}
+
+func createFailedMachineNormalizedProviderID(namespace, name string) string {
+	return fmt.Sprintf("%s%s_%s", failedMachinePrefix, namespace, name)
 }
 
 func isFailedMachineProviderID(providerID normalizedProviderID) bool {
@@ -270,6 +382,15 @@ func isFailedMachineProviderID(providerID normalizedProviderID) bool {
 func machineKeyFromFailedProviderID(providerID normalizedProviderID) string {
 	namespaceName := strings.TrimPrefix(string(providerID), failedMachinePrefix)
 	return strings.Replace(namespaceName, "_", "/", 1)
+}
+
+// isProviderIDNormalized determines whether a node's providerID is the standard
+// providerID assigned by the cloud provider, or if it has
+// been modified by the CAS CAPI provider to indicate deleting, pending, or failed
+func isProviderIDNormalized(providerID normalizedProviderID) bool {
+	return !isDeletingMachineProviderID(providerID) &&
+		!isPendingMachineProviderID(providerID) &&
+		!isFailedMachineProviderID(providerID)
 }
 
 // findNodeByNodeName finds the Node object keyed by name.. Returns
@@ -305,8 +426,19 @@ func getCAPIGroup() string {
 	return g
 }
 
+// getCAPIVersion returns a string the specifies the version for the API.
+// It will return either the value from the CAPI_VERSION environment variable,
+// or an empty string if the variable is not set.
+func getCAPIVersion() string {
+	v := os.Getenv(CAPIVersionEnvVar)
+	if v != "" {
+		klog.V(4).Infof("Using API Version %q", v)
+	}
+	return v
+}
+
 // newMachineController constructs a controller that watches Nodes,
-// Machines and MachineSet as they are added, updated and deleted on
+// Machines, MachinePools, MachineDeployments, and MachineSets as they are added, updated, and deleted on
 // the cluster.
 func newMachineController(
 	managementClient dynamic.Interface,
@@ -314,6 +446,7 @@ func newMachineController(
 	managementDiscoveryClient discovery.DiscoveryInterface,
 	managementScaleClient scale.ScalesGetter,
 	discoveryOpts cloudprovider.NodeGroupDiscoveryOptions,
+	stopChannel chan struct{},
 ) (*machineController, error) {
 	workloadInformerFactory := kubeinformers.NewSharedInformerFactory(workloadClient, 0)
 
@@ -325,7 +458,7 @@ func newMachineController(
 	managementInformerFactory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(managementClient, 0, namespaceToWatch(autoDiscoverySpecs), nil)
 
 	CAPIGroup := getCAPIGroup()
-	CAPIVersion, err := getAPIGroupPreferredVersion(managementDiscoveryClient, CAPIGroup)
+	CAPIVersion, err := getCAPIGroupPreferredVersion(managementDiscoveryClient, CAPIGroup)
 	if err != nil {
 		return nil, fmt.Errorf("could not find preferred version for CAPI group %q: %v", CAPIGroup, err)
 	}
@@ -348,7 +481,9 @@ func newMachineController(
 			Resource: resourceNameMachineDeployment,
 		}
 		machineDeploymentInformer = managementInformerFactory.ForResource(gvrMachineDeployment)
-		machineDeploymentInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{})
+		if _, err := machineDeploymentInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{}); err != nil {
+			return nil, fmt.Errorf("failed to add event handler for resource %q: %v", resourceNameMachineDeployment, err)
+		}
 	}
 
 	gvrMachineSet := schema.GroupVersionResource{
@@ -357,7 +492,37 @@ func newMachineController(
 		Resource: resourceNameMachineSet,
 	}
 	machineSetInformer := managementInformerFactory.ForResource(gvrMachineSet)
-	machineSetInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{})
+	if _, err := machineSetInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{}); err != nil {
+		return nil, fmt.Errorf("failed to add event handler for resource %q: %v", resourceNameMachineSet, err)
+	}
+
+	var gvrMachinePool schema.GroupVersionResource
+	var machinePoolInformer informers.GenericInformer
+
+	machinePoolsAvailable, err := groupVersionHasResource(managementDiscoveryClient,
+		fmt.Sprintf("%s/%s", CAPIGroup, CAPIVersion), resourceNameMachinePool)
+	if err != nil {
+		return nil, fmt.Errorf("failed to validate if resource %q is available for group %q: %v",
+			resourceNameMachinePool, fmt.Sprintf("%s/%s", CAPIGroup, CAPIVersion), err)
+	}
+
+	if machinePoolsAvailable {
+		gvrMachinePool = schema.GroupVersionResource{
+			Group:    CAPIGroup,
+			Version:  CAPIVersion,
+			Resource: resourceNameMachinePool,
+		}
+		machinePoolInformer = managementInformerFactory.ForResource(gvrMachinePool)
+		if _, err := machinePoolInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{}); err != nil {
+			return nil, fmt.Errorf("failed to add event handler for resource %q: %w", resourceNameMachinePool, err)
+		}
+
+		if err := machinePoolInformer.Informer().GetIndexer().AddIndexers(cache.Indexers{
+			machinePoolProviderIDIndex: indexMachinePoolByProviderID,
+		}); err != nil {
+			return nil, fmt.Errorf("cannot add machine pool indexer: %v", err)
+		}
+	}
 
 	gvrMachine := schema.GroupVersionResource{
 		Group:    CAPIGroup,
@@ -365,10 +530,14 @@ func newMachineController(
 		Resource: resourceNameMachine,
 	}
 	machineInformer := managementInformerFactory.ForResource(gvrMachine)
-	machineInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{})
+	if _, err := machineInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{}); err != nil {
+		return nil, fmt.Errorf("failed to add event handler for resource %q: %v", resourceNameMachine, err)
+	}
 
 	nodeInformer := workloadInformerFactory.Core().V1().Nodes().Informer()
-	nodeInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{})
+	if _, err := nodeInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{}); err != nil {
+		return nil, fmt.Errorf("failed to add event handler for resource %q: %v", "nodes", err)
+	}
 
 	if err := machineInformer.Informer().GetIndexer().AddIndexers(cache.Indexers{
 		machineProviderIDIndex: indexMachineByProviderID,
@@ -389,13 +558,18 @@ func newMachineController(
 		machineDeploymentInformer:   machineDeploymentInformer,
 		machineInformer:             machineInformer,
 		machineSetInformer:          machineSetInformer,
+		machinePoolInformer:         machinePoolInformer,
 		nodeInformer:                nodeInformer,
 		managementClient:            managementClient,
 		managementScaleClient:       managementScaleClient,
+		managementDiscoveryClient:   managementDiscoveryClient,
 		machineSetResource:          gvrMachineSet,
+		machinePoolResource:         gvrMachinePool,
+		machinePoolsAvailable:       machinePoolsAvailable,
 		machineResource:             gvrMachine,
 		machineDeploymentResource:   gvrMachineDeployment,
 		machineDeploymentsAvailable: machineDeploymentAvailable,
+		stopChannel:                 stopChannel,
 	}, nil
 }
 
@@ -414,6 +588,14 @@ func groupVersionHasResource(client discovery.DiscoveryInterface, groupVersion, 
 	return false, nil
 }
 
+func getCAPIGroupPreferredVersion(client discovery.DiscoveryInterface, APIGroup string) (string, error) {
+	if version := os.Getenv(CAPIVersionEnvVar); version != "" {
+		return version, nil
+	}
+
+	return getAPIGroupPreferredVersion(client, APIGroup)
+}
+
 func getAPIGroupPreferredVersion(client discovery.DiscoveryInterface, APIGroup string) (string, error) {
 	groupList, err := client.ServerGroups()
 	if err != nil {
@@ -430,43 +612,78 @@ func getAPIGroupPreferredVersion(client discovery.DiscoveryInterface, APIGroup s
 }
 
 func (c *machineController) scalableResourceProviderIDs(scalableResource *unstructured.Unstructured) ([]string, error) {
+	if scalableResource.GetKind() == machinePoolKind {
+		return c.findMachinePoolProviderIDs(scalableResource)
+	}
+	return c.findScalableResourceProviderIDs(scalableResource)
+}
+
+func (c *machineController) findMachinePoolProviderIDs(scalableResource *unstructured.Unstructured) ([]string, error) {
+	var providerIDs []string
+
+	providerIDList, found, err := unstructured.NestedStringSlice(scalableResource.UnstructuredContent(), "spec", "providerIDList")
+	if err != nil {
+		return nil, err
+	}
+	if found {
+		providerIDs = providerIDList
+	} else {
+		klog.Warningf("Machine Pool %q has no providerIDList", scalableResource.GetName())
+	}
+
+	klog.V(4).Infof("nodegroup %s has %d nodes: %v", scalableResource.GetName(), len(providerIDs), providerIDs)
+	return providerIDs, nil
+}
+
+func (c *machineController) findScalableResourceProviderIDs(scalableResource *unstructured.Unstructured) ([]string, error) {
+	var providerIDs []string
+
 	machines, err := c.listMachinesForScalableResource(scalableResource)
 	if err != nil {
 		return nil, fmt.Errorf("error listing machines: %v", err)
 	}
 
-	var providerIDs []string
 	for _, machine := range machines {
-		providerID, found, err := unstructured.NestedString(machine.UnstructuredContent(), "spec", "providerID")
-		if err != nil {
-			return nil, err
-		}
-
-		if found {
-			if providerID != "" {
-				providerIDs = append(providerIDs, providerID)
-				continue
-			}
-		}
-
-		klog.Warningf("Machine %q has no providerID", machine.GetName())
-
+		// Failed Machines
+		// In some cases it is possible for a machine to have acquired a provider ID from the infrastructure and
+		// then become failed later. We want to ensure that a failed machine is not counted towards the total
+		// number of nodes in the cluster, for this reason we will detect a failed machine first, regardless
+		// of provider ID, and give it a normalized provider ID with failure message prepended.
 		failureMessage, found, err := unstructured.NestedString(machine.UnstructuredContent(), "status", "failureMessage")
 		if err != nil {
 			return nil, err
 		}
 
 		if found {
-			klog.V(4).Infof("Status.FailureMessage of machine %q is %q", machine.GetName(), failureMessage)
-			// Provide a fake ID to allow the autoscaler to track machines that will never
+			// Provide a normalized ID to allow the autoscaler to track machines that will never
 			// become nodes and mark the nodegroup unhealthy after maxNodeProvisionTime.
 			// Fake ID needs to be recognised later and converted into a machine key.
 			// Use an underscore as a separator between namespace and name as it is not a
 			// valid character within a namespace name.
-			providerIDs = append(providerIDs, fmt.Sprintf("%s%s_%s", failedMachinePrefix, machine.GetNamespace(), machine.GetName()))
+			klog.V(4).Infof("Status.FailureMessage of machine %q is %q", machine.GetName(), failureMessage)
+			providerIDs = append(providerIDs, createFailedMachineNormalizedProviderID(machine.GetNamespace(), machine.GetName()))
 			continue
 		}
 
+		// Deleting Machines
+		// Machines that are in deleting state should be identified so that in scenarios where the core
+		// autoscaler would like to adjust the size of a node group, we can give a proper count and
+		// be able to filter machines in that state, regardless of whether they are still active nodes in the cluster.
+		// We give these machines normalized provider IDs to aid in the filtering process.
+		if !machine.GetDeletionTimestamp().IsZero() {
+			klog.V(4).Infof("Machine %q has a non-zero deletion timestamp", machine.GetName())
+			providerIDs = append(providerIDs, createDeletingMachineNormalizedProviderID(machine.GetNamespace(), machine.GetName()))
+			continue
+		}
+
+		// Pending Machines
+		// Machines that do not yet have an associated node reference are considering to be pending. These
+		// nodes need to be filtered so that in a case where a machine is not becoming a node, or the instance
+		// lifecycle has changed during provisioning (eg spot instance going away), or the core autoscaler has
+		// decided that the node is not needed.
+		// Look for a node reference in the status, a machine without a node reference, and that is also not
+		// in failed or deleting state, has not yet become a node, and should be marked as pending.
+		// We give these machines normalized provider IDs to aid in the filtering process.
 		_, found, err = unstructured.NestedFieldCopy(machine.UnstructuredContent(), "status", "nodeRef")
 		if err != nil {
 			return nil, err
@@ -474,9 +691,33 @@ func (c *machineController) scalableResourceProviderIDs(scalableResource *unstru
 
 		if !found {
 			klog.V(4).Infof("Status.NodeRef of machine %q is currently nil", machine.GetName())
+			providerIDs = append(providerIDs, createPendingMachineProviderID(machine.GetNamespace(), machine.GetName()))
 			continue
 		}
 
+		// Running Machines
+		// We have filtered out the machines in failed, deleting, and pending states. We now check the provider
+		// ID and potentially the node reference details. It is ok for a machine not to have a provider ID as
+		// not all CAPI provider implement this field, but a machine in running state should have a valid
+		// node reference. If a provider ID is present, we add that to the list as we know it is not failed,
+		// deleting, or pending. If an empty provider ID is present, we check the node details to ensure that
+		// the machine references a valid node.
+		providerID, found, err := unstructured.NestedString(machine.UnstructuredContent(), "spec", "providerID")
+		if err != nil {
+			return nil, err
+		}
+
+		if found {
+			if providerID != "" {
+				// Machine has a provider ID, add it to the list
+				providerIDs = append(providerIDs, providerID)
+				continue
+			}
+		}
+
+		klog.Warningf("Machine %q has no providerID", machine.GetName())
+
+		// Begin checking to determine if the node reference is valid
 		nodeRefKind, found, err := unstructured.NestedString(machine.UnstructuredContent(), "status", "nodeRef", "kind")
 		if err != nil {
 			return nil, err
@@ -498,24 +739,25 @@ func (c *machineController) scalableResourceProviderIDs(scalableResource *unstru
 				return nil, fmt.Errorf("unknown node %q", nodeRefName)
 			}
 
+			// A node has been found that corresponds to this machine, since we know that this machine has
+			// an empty provider ID, we add the provider ID from the node to the list.
 			if node != nil {
 				providerIDs = append(providerIDs, node.Spec.ProviderID)
 			}
 		}
 	}
 
-	klog.V(4).Infof("nodegroup %s has nodes %v", scalableResource.GetName(), providerIDs)
-
+	klog.V(4).Infof("nodegroup %s has %d nodes: %v", scalableResource.GetName(), len(providerIDs), providerIDs)
 	return providerIDs, nil
 }
 
-func (c *machineController) nodeGroups() ([]*nodegroup, error) {
+func (c *machineController) nodeGroups() ([]cloudprovider.NodeGroup, error) {
 	scalableResources, err := c.listScalableResources()
 	if err != nil {
 		return nil, err
 	}
 
-	nodegroups := make([]*nodegroup, 0, len(scalableResources))
+	nodegroups := make([]cloudprovider.NodeGroup, 0, len(scalableResources))
 
 	for _, r := range scalableResources {
 		ng, err := newNodeGroupFromScalableResource(c, r)
@@ -525,6 +767,7 @@ func (c *machineController) nodeGroups() ([]*nodegroup, error) {
 
 		if ng != nil {
 			nodegroups = append(nodegroups, ng)
+			klog.V(4).Infof("discovered node group: %s", ng.Debug())
 		}
 	}
 	return nodegroups, nil
@@ -620,6 +863,16 @@ func (c *machineController) listScalableResources() ([]*unstructured.Unstructure
 
 		scalableResources = append(scalableResources, machineDeployments...)
 	}
+
+	if c.machinePoolsAvailable {
+		machinePools, err := c.listResources(c.machinePoolInformer.Lister())
+		if err != nil {
+			return nil, err
+		}
+
+		scalableResources = append(scalableResources, machinePools...)
+	}
+
 	return scalableResources, nil
 }
 
@@ -690,4 +943,31 @@ func (c *machineController) allowedByAutoDiscoverySpecs(r *unstructured.Unstruct
 	}
 
 	return false
+}
+
+// Get an infrastructure machine template given its GVR, name, and namespace.
+func (c *machineController) getInfrastructureResource(resource schema.GroupVersionResource, name string, namespace string) (*unstructured.Unstructured, error) {
+	// get an informer for this type, this will create the informer if it does not exist
+	informer := c.managementInformerFactory.ForResource(resource)
+	// since this may be a new informer, we need to restart the informer factory
+	c.managementInformerFactory.Start(c.stopChannel)
+	// wait for the informer to sync
+	klog.V(4).Infof("waiting for cache sync on infrastructure resource")
+	if !cache.WaitForCacheSync(c.stopChannel, informer.Informer().HasSynced) {
+		return nil, fmt.Errorf("syncing cache on infrastructure resource failed")
+	}
+	// use the informer to get the object we want, this will use the informer cache if possible
+	obj, err := informer.Lister().ByNamespace(namespace).Get(name)
+	if err != nil {
+		klog.V(4).Infof("Unable to read infrastructure reference from informer, error: %v", err)
+		return nil, err
+	}
+
+	infra, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		err := fmt.Errorf("unable to convert infrastructure reference for %s/%s", namespace, name)
+		klog.V(4).Infof("%v", err)
+		return nil, err
+	}
+	return infra, err
 }

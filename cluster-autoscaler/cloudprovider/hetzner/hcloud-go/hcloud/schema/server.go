@@ -1,26 +1,10 @@
-/*
-Copyright 2018 The Kubernetes Authors.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package schema
 
 import "time"
 
 // Server defines the schema of a server.
 type Server struct {
-	ID              int                `json:"id"`
+	ID              int64              `json:"id"`
 	Name            string             `json:"name"`
 	Status          string             `json:"status"`
 	Created         time.Time          `json:"created"`
@@ -38,8 +22,10 @@ type Server struct {
 	Image           *Image             `json:"image"`
 	Protection      ServerProtection   `json:"protection"`
 	Labels          map[string]string  `json:"labels"`
-	Volumes         []int              `json:"volumes"`
+	Volumes         []int64            `json:"volumes"`
 	PrimaryDiskSize int                `json:"primary_disk_size"`
+	PlacementGroup  *PlacementGroup    `json:"placement_group"`
+	LoadBalancers   []int64            `json:"load_balancers"`
 }
 
 // ServerProtection defines the schema of a server's resource protection.
@@ -53,12 +39,14 @@ type ServerProtection struct {
 type ServerPublicNet struct {
 	IPv4        ServerPublicNetIPv4 `json:"ipv4"`
 	IPv6        ServerPublicNetIPv6 `json:"ipv6"`
-	FloatingIPs []int               `json:"floating_ips"`
+	FloatingIPs []int64             `json:"floating_ips"`
+	Firewalls   []ServerFirewall    `json:"firewalls"`
 }
 
 // ServerPublicNetIPv4 defines the schema of a server's public
 // network information for an IPv4.
 type ServerPublicNetIPv4 struct {
+	ID      int64  `json:"id"`
 	IP      string `json:"ip"`
 	Blocked bool   `json:"blocked"`
 	DNSPtr  string `json:"dns_ptr"`
@@ -67,6 +55,7 @@ type ServerPublicNetIPv4 struct {
 // ServerPublicNetIPv6 defines the schema of a server's public
 // network information for an IPv6.
 type ServerPublicNetIPv6 struct {
+	ID      int64                       `json:"id"`
 	IP      string                      `json:"ip"`
 	Blocked bool                        `json:"blocked"`
 	DNSPtr  []ServerPublicNetIPv6DNSPtr `json:"dns_ptr"`
@@ -79,9 +68,16 @@ type ServerPublicNetIPv6DNSPtr struct {
 	DNSPtr string `json:"dns_ptr"`
 }
 
+// ServerFirewall defines the schema of a Server's Firewalls on
+// a certain network interface.
+type ServerFirewall struct {
+	ID     int64  `json:"id"`
+	Status string `json:"status"`
+}
+
 // ServerPrivateNet defines the schema of a server's private network information.
 type ServerPrivateNet struct {
-	Network    int      `json:"network"`
+	Network    int64    `json:"network"`
 	IP         string   `json:"ip"`
 	AliasIPs   []string `json:"alias_ips"`
 	MACAddress string   `json:"mac_address"`
@@ -102,18 +98,34 @@ type ServerListResponse struct {
 // ServerCreateRequest defines the schema for the request to
 // create a server.
 type ServerCreateRequest struct {
-	Name             string             `json:"name"`
-	ServerType       interface{}        `json:"server_type"` // int or string
-	Image            interface{}        `json:"image"`       // int or string
-	SSHKeys          []int              `json:"ssh_keys,omitempty"`
-	Location         string             `json:"location,omitempty"`
-	Datacenter       string             `json:"datacenter,omitempty"`
-	UserData         string             `json:"user_data,omitempty"`
-	StartAfterCreate *bool              `json:"start_after_create,omitempty"`
-	Labels           *map[string]string `json:"labels,omitempty"`
-	Automount        *bool              `json:"automount,omitempty"`
-	Volumes          []int              `json:"volumes,omitempty"`
-	Networks         []int              `json:"networks,omitempty"`
+	Name             string                  `json:"name"`
+	ServerType       IDOrName                `json:"server_type"`
+	Image            IDOrName                `json:"image"`
+	SSHKeys          []int64                 `json:"ssh_keys,omitempty"`
+	Location         string                  `json:"location,omitempty"`
+	Datacenter       string                  `json:"datacenter,omitempty"`
+	UserData         string                  `json:"user_data,omitempty"`
+	StartAfterCreate *bool                   `json:"start_after_create,omitempty"`
+	Labels           *map[string]string      `json:"labels,omitempty"`
+	Automount        *bool                   `json:"automount,omitempty"`
+	Volumes          []int64                 `json:"volumes,omitempty"`
+	Networks         []int64                 `json:"networks,omitempty"`
+	Firewalls        []ServerCreateFirewalls `json:"firewalls,omitempty"`
+	PlacementGroup   int64                   `json:"placement_group,omitempty"`
+	PublicNet        *ServerCreatePublicNet  `json:"public_net,omitempty"`
+}
+
+// ServerCreatePublicNet defines the public network configuration of a server.
+type ServerCreatePublicNet struct {
+	EnableIPv4 bool  `json:"enable_ipv4"`
+	EnableIPv6 bool  `json:"enable_ipv6"`
+	IPv4ID     int64 `json:"ipv4,omitempty"`
+	IPv6ID     int64 `json:"ipv6,omitempty"`
+}
+
+// ServerCreateFirewalls defines which Firewalls to apply when creating a Server.
+type ServerCreateFirewalls struct {
+	Firewall int64 `json:"firewall"`
 }
 
 // ServerCreateResponse defines the schema of the response when
@@ -123,6 +135,12 @@ type ServerCreateResponse struct {
 	Action       Action   `json:"action"`
 	RootPassword *string  `json:"root_password"`
 	NextActions  []Action `json:"next_actions"`
+}
+
+// ServerDeleteResponse defines the schema of the response when
+// deleting a server.
+type ServerDeleteResponse struct {
+	Action Action `json:"action"`
 }
 
 // ServerUpdateRequest defines the schema of the request to update a server.
@@ -216,7 +234,7 @@ type ServerActionCreateImageResponse struct {
 // create a enable_rescue server action.
 type ServerActionEnableRescueRequest struct {
 	Type    *string `json:"type,omitempty"`
-	SSHKeys []int   `json:"ssh_keys,omitempty"`
+	SSHKeys []int64 `json:"ssh_keys,omitempty"`
 }
 
 // ServerActionEnableRescueResponse defines the schema of the response when
@@ -239,19 +257,20 @@ type ServerActionDisableRescueResponse struct {
 // ServerActionRebuildRequest defines the schema for the request to
 // rebuild a server.
 type ServerActionRebuildRequest struct {
-	Image interface{} `json:"image"` // int or string
+	Image IDOrName `json:"image"`
 }
 
 // ServerActionRebuildResponse defines the schema of the response when
 // creating a rebuild server action.
 type ServerActionRebuildResponse struct {
-	Action Action `json:"action"`
+	Action       Action  `json:"action"`
+	RootPassword *string `json:"root_password"`
 }
 
 // ServerActionAttachISORequest defines the schema for the request to
 // attach an ISO to a server.
 type ServerActionAttachISORequest struct {
-	ISO interface{} `json:"iso"` // int or string
+	ISO IDOrName `json:"iso"`
 }
 
 // ServerActionAttachISOResponse defines the schema of the response when
@@ -268,12 +287,6 @@ type ServerActionDetachISORequest struct{}
 // creating a detach_iso server action.
 type ServerActionDetachISOResponse struct {
 	Action Action `json:"action"`
-}
-
-// ServerActionEnableBackupRequest defines the schema for the request to
-// enable backup for a server.
-type ServerActionEnableBackupRequest struct {
-	BackupWindow *string `json:"backup_window,omitempty"`
 }
 
 // ServerActionEnableBackupResponse defines the schema of the response when
@@ -295,8 +308,8 @@ type ServerActionDisableBackupResponse struct {
 // ServerActionChangeTypeRequest defines the schema for the request to
 // change a server's type.
 type ServerActionChangeTypeRequest struct {
-	ServerType  interface{} `json:"server_type"` // int or string
-	UpgradeDisk bool        `json:"upgrade_disk"`
+	ServerType  IDOrName `json:"server_type"`
+	UpgradeDisk bool     `json:"upgrade_disk"`
 }
 
 // ServerActionChangeTypeResponse defines the schema of the response when
@@ -346,7 +359,7 @@ type ServerActionRequestConsoleResponse struct {
 // ServerActionAttachToNetworkRequest defines the schema for the request to
 // attach a network to a server.
 type ServerActionAttachToNetworkRequest struct {
-	Network  int       `json:"network"`
+	Network  int64     `json:"network"`
 	IP       *string   `json:"ip,omitempty"`
 	AliasIPs []*string `json:"alias_ips,omitempty"`
 }
@@ -360,7 +373,7 @@ type ServerActionAttachToNetworkResponse struct {
 // ServerActionDetachFromNetworkRequest defines the schema for the request to
 // detach a network from a server.
 type ServerActionDetachFromNetworkRequest struct {
-	Network int `json:"network"`
+	Network int64 `json:"network"`
 }
 
 // ServerActionDetachFromNetworkResponse defines the schema of the response when
@@ -372,12 +385,46 @@ type ServerActionDetachFromNetworkResponse struct {
 // ServerActionChangeAliasIPsRequest defines the schema for the request to
 // change a server's alias IPs in a network.
 type ServerActionChangeAliasIPsRequest struct {
-	Network  int      `json:"network"`
+	Network  int64    `json:"network"`
 	AliasIPs []string `json:"alias_ips"`
 }
 
 // ServerActionChangeAliasIPsResponse defines the schema of the response when
 // creating an change_alias_ips server action.
 type ServerActionChangeAliasIPsResponse struct {
+	Action Action `json:"action"`
+}
+
+// ServerGetMetricsResponse defines the schema of the response when requesting
+// metrics for a server.
+type ServerGetMetricsResponse struct {
+	Metrics struct {
+		Start      time.Time                       `json:"start"`
+		End        time.Time                       `json:"end"`
+		Step       float64                         `json:"step"`
+		TimeSeries map[string]ServerTimeSeriesVals `json:"time_series"`
+	} `json:"metrics"`
+}
+
+// ServerTimeSeriesVals contains the values for a Server time series.
+type ServerTimeSeriesVals struct {
+	Values []interface{} `json:"values"`
+}
+
+// ServerActionAddToPlacementGroupRequest defines the schema for the request to
+// add a server to a placement group.
+type ServerActionAddToPlacementGroupRequest struct {
+	PlacementGroup int64 `json:"placement_group"`
+}
+
+// ServerActionAddToPlacementGroupResponse defines the schema of the response when
+// creating an add_to_placement_group server action.
+type ServerActionAddToPlacementGroupResponse struct {
+	Action Action `json:"action"`
+}
+
+// ServerActionRemoveFromPlacementGroupResponse defines the schema of the response when
+// creating a remove_from_placement_group server action.
+type ServerActionRemoveFromPlacementGroupResponse struct {
 	Action Action `json:"action"`
 }

@@ -1,43 +1,25 @@
-/*
-Copyright 2018 The Kubernetes Authors.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package hcloud
 
 import (
 	"context"
 	"fmt"
 	"net/url"
-	"strconv"
 	"time"
 
+	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/hetzner/hcloud-go/hcloud/exp/ctxutil"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/hetzner/hcloud-go/hcloud/schema"
 )
 
 // ISO represents an ISO image in the Hetzner Cloud.
 type ISO struct {
-	ID          int
-	Name        string
-	Description string
-	Type        ISOType
-	Deprecated  time.Time
-}
-
-// IsDeprecated returns true if the ISO is deprecated
-func (iso *ISO) IsDeprecated() bool {
-	return !iso.Deprecated.IsZero()
+	ID           int64
+	Name         string
+	Description  string
+	Type         ISOType
+	Architecture *Architecture
+	// Deprecated: Use [ISO.Deprecation] instead.
+	Deprecated time.Time
+	DeprecatableResource
 }
 
 // ISOType specifies the type of an ISO image.
@@ -57,53 +39,65 @@ type ISOClient struct {
 }
 
 // GetByID retrieves an ISO by its ID.
-func (c *ISOClient) GetByID(ctx context.Context, id int) (*ISO, *Response, error) {
-	req, err := c.client.NewRequest(ctx, "GET", fmt.Sprintf("/isos/%d", id), nil)
-	if err != nil {
-		return nil, nil, err
-	}
+func (c *ISOClient) GetByID(ctx context.Context, id int64) (*ISO, *Response, error) {
+	const opPath = "/isos/%d"
+	ctx = ctxutil.SetOpPath(ctx, opPath)
 
-	var body schema.ISOGetResponse
-	resp, err := c.client.Do(req, &body)
+	reqPath := fmt.Sprintf(opPath, id)
+
+	respBody, resp, err := getRequest[schema.ISOGetResponse](ctx, c.client, reqPath)
 	if err != nil {
 		if IsError(err, ErrorCodeNotFound) {
 			return nil, resp, nil
 		}
 		return nil, resp, err
 	}
-	return ISOFromSchema(body.ISO), resp, nil
+
+	return ISOFromSchema(respBody.ISO), resp, nil
 }
 
 // GetByName retrieves an ISO by its name.
 func (c *ISOClient) GetByName(ctx context.Context, name string) (*ISO, *Response, error) {
-	if name == "" {
-		return nil, nil, nil
-	}
-	isos, response, err := c.List(ctx, ISOListOpts{Name: name})
-	if len(isos) == 0 {
-		return nil, response, err
-	}
-	return isos[0], response, err
+	return firstByName(name, func() ([]*ISO, *Response, error) {
+		return c.List(ctx, ISOListOpts{Name: name})
+	})
 }
 
 // Get retrieves an ISO by its ID if the input can be parsed as an integer, otherwise it retrieves an ISO by its name.
 func (c *ISOClient) Get(ctx context.Context, idOrName string) (*ISO, *Response, error) {
-	if id, err := strconv.Atoi(idOrName); err == nil {
-		return c.GetByID(ctx, int(id))
-	}
-	return c.GetByName(ctx, idOrName)
+	return getByIDOrName(ctx, c.GetByID, c.GetByName, idOrName)
 }
 
 // ISOListOpts specifies options for listing isos.
 type ISOListOpts struct {
 	ListOpts
 	Name string
+	Sort []string
+	// Architecture filters the ISOs by Architecture. Note that custom ISOs do not have any architecture set, and you
+	// must use IncludeWildcardArchitecture to include them.
+	Architecture []Architecture
+	// IncludeWildcardArchitecture must be set to also return custom ISOs that have no architecture set, if you are
+	// also setting the Architecture field.
+	// Deprecated: Use [ISOListOpts.IncludeArchitectureWildcard] instead.
+	IncludeWildcardArchitecture bool
+	// IncludeWildcardArchitecture must be set to also return custom ISOs that have no architecture set, if you are
+	// also setting the Architecture field.
+	IncludeArchitectureWildcard bool
 }
 
 func (l ISOListOpts) values() url.Values {
-	vals := l.ListOpts.values()
+	vals := l.ListOpts.Values()
 	if l.Name != "" {
 		vals.Add("name", l.Name)
+	}
+	for _, sort := range l.Sort {
+		vals.Add("sort", sort)
+	}
+	for _, arch := range l.Architecture {
+		vals.Add("architecture", string(arch))
+	}
+	if l.IncludeArchitectureWildcard || l.IncludeWildcardArchitecture {
+		vals.Add("include_architecture_wildcard", "true")
 	}
 	return vals
 }
@@ -113,43 +107,28 @@ func (l ISOListOpts) values() url.Values {
 // Please note that filters specified in opts are not taken into account
 // when their value corresponds to their zero value or when they are empty.
 func (c *ISOClient) List(ctx context.Context, opts ISOListOpts) ([]*ISO, *Response, error) {
-	path := "/isos?" + opts.values().Encode()
-	req, err := c.client.NewRequest(ctx, "GET", path, nil)
+	const opPath = "/isos?%s"
+	ctx = ctxutil.SetOpPath(ctx, opPath)
+
+	reqPath := fmt.Sprintf(opPath, opts.values().Encode())
+
+	respBody, resp, err := getRequest[schema.ISOListResponse](ctx, c.client, reqPath)
 	if err != nil {
-		return nil, nil, err
+		return nil, resp, err
 	}
 
-	var body schema.ISOListResponse
-	resp, err := c.client.Do(req, &body)
-	if err != nil {
-		return nil, nil, err
-	}
-	isos := make([]*ISO, 0, len(body.ISOs))
-	for _, i := range body.ISOs {
-		isos = append(isos, ISOFromSchema(i))
-	}
-	return isos, resp, nil
+	return allFromSchemaFunc(respBody.ISOs, ISOFromSchema), resp, nil
 }
 
 // All returns all ISOs.
 func (c *ISOClient) All(ctx context.Context) ([]*ISO, error) {
-	allISOs := []*ISO{}
+	return c.AllWithOpts(ctx, ISOListOpts{ListOpts: ListOpts{PerPage: 50}})
+}
 
-	opts := ISOListOpts{}
-	opts.PerPage = 50
-
-	_, err := c.client.all(func(page int) (*Response, error) {
+// AllWithOpts returns all ISOs for the given options.
+func (c *ISOClient) AllWithOpts(ctx context.Context, opts ISOListOpts) ([]*ISO, error) {
+	return iterPages(func(page int) ([]*ISO, *Response, error) {
 		opts.Page = page
-		isos, resp, err := c.List(ctx, opts)
-		if err != nil {
-			return resp, err
-		}
-		allISOs = append(allISOs, isos...)
-		return resp, nil
+		return c.List(ctx, opts)
 	})
-	if err != nil {
-		return nil, err
-	}
-
-	return allISOs, nil
 }

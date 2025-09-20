@@ -21,10 +21,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/ec2metadata"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/ec2"
+	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/aws/aws-sdk-go/aws"
+	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/aws/aws-sdk-go/aws/ec2metadata"
+	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/aws/aws-sdk-go/aws/session"
+	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/aws/aws-sdk-go/service/ec2"
 )
 
 var (
@@ -32,19 +32,12 @@ var (
 )
 
 // GenerateEC2InstanceTypes returns a map of ec2 resources
-func GenerateEC2InstanceTypes(region string) (map[string]*InstanceType, error) {
-	sess, err := session.NewSession(&aws.Config{
-		Region: aws.String(region)},
-	)
-	if err != nil {
-		return nil, err
-	}
-
+func GenerateEC2InstanceTypes(sess *session.Session) (map[string]*InstanceType, error) {
 	ec2Client := ec2.New(sess)
 	input := ec2.DescribeInstanceTypesInput{}
 	instanceTypes := make(map[string]*InstanceType)
 
-	if err = ec2Client.DescribeInstanceTypesPages(&input, func(page *ec2.DescribeInstanceTypesOutput, isLastPage bool) bool {
+	if err := ec2Client.DescribeInstanceTypesPages(&input, func(page *ec2.DescribeInstanceTypesOutput, isLastPage bool) bool {
 		for _, rawInstanceType := range page.InstanceTypes {
 			instanceTypes[*rawInstanceType.InstanceType] = transformInstanceType(rawInstanceType)
 		}

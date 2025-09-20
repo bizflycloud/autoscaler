@@ -18,6 +18,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"regexp"
+	"sort"
 	"strings"
 
 	brightbox "k8s.io/autoscaler/cluster-autoscaler/cloudprovider/brightbox/gobrightbox"
@@ -166,6 +168,36 @@ func (c *Cloud) GetServerType(identifier string) (*brightbox.ServerType, error) 
 	return client.ServerType(identifier)
 }
 
+// GetImageByName obtains the most recent available image that matches the supplied pattern
+func (c *Cloud) GetImageByName(name string) (*brightbox.Image, error) {
+	klog.V(4).Infof("GetImageByName %q", name)
+	client, err := c.CloudClient()
+	if err != nil {
+		return nil, err
+	}
+	klog.V(6).Info("GetImageByName compiling regexp")
+	nameRe, err := regexp.Compile(name)
+	if err != nil {
+		return nil, err
+	}
+	klog.V(6).Info("GetImageByName retrieving images")
+	images, err := client.Images()
+	if err != nil {
+		return nil, err
+	}
+	klog.V(6).Info("GetImageByName filtering images")
+	filteredImages := filter(
+		images,
+		func(i brightbox.Image) bool {
+			return i.Official &&
+				i.Status == status.Available &&
+				nameRe.MatchString(i.Name)
+		},
+	)
+	klog.V(6).Infof("GetImageByName images selected (%+v)", filteredImages)
+	return mostRecent(filteredImages), nil
+}
+
 // GetConfigMaps obtains the list of Config Maps on the account
 func (c *Cloud) GetConfigMaps() ([]brightbox.ConfigMap, error) {
 	klog.V(4).Info("GetConfigMaps")
@@ -306,7 +338,7 @@ func (c *Cloud) GetCloudIPs() ([]brightbox.CloudIP, error) {
 	return client.CloudIPs()
 }
 
-//Get a cloudIp by id
+// Get a cloudIp by id
 func (c *Cloud) getCloudIP(id string) (*brightbox.CloudIP, error) {
 	klog.V(4).Infof("getCloudIP (%q)", id)
 	client, err := c.CloudClient()
@@ -378,7 +410,7 @@ func (c *Cloud) unmapCloudIP(id string) error {
 	return client.UnMapCloudIP(id)
 }
 
-//DestroyCloudIPs matching 'name' from a supplied list of cloudIPs
+// DestroyCloudIPs matching 'name' from a supplied list of cloudIPs
 func (c *Cloud) DestroyCloudIPs(cloudIPList []brightbox.CloudIP, name string) error {
 	klog.V(4).Infof("DestroyCloudIPs (%q)", name)
 	for _, v := range cloudIPList {
@@ -554,4 +586,28 @@ func ErrorIfAcmeNotComplete(acme *brightbox.LoadBalancerAcme) error {
 		}
 	}
 	return nil
+}
+
+// Returns the most recent item out of a slice of items with Dates
+// or nil if there are no items
+func mostRecent(items []brightbox.Image) *brightbox.Image {
+	if len(items) == 0 {
+		return nil
+	}
+	sortedItems := items
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].CreatedAt.Unix() > items[j].CreatedAt.Unix()
+	})
+	return &sortedItems[0]
+}
+
+// filter returns a new slice with all elements from the
+// input elements for which the provided predicate function returns true.
+func filter[T any](input []T, pred func(T) bool) (output []T) {
+	for _, v := range input {
+		if pred(v) {
+			output = append(output, v)
+		}
+	}
+	return output
 }

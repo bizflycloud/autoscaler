@@ -24,40 +24,38 @@ import (
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	labels "k8s.io/apimachinery/pkg/labels"
+
 	vpa_types "k8s.io/autoscaler/vertical-pod-autoscaler/pkg/apis/autoscaling.k8s.io/v1"
 	"k8s.io/autoscaler/vertical-pod-autoscaler/pkg/recommender/util"
 )
 
 var (
-	testPodID1       = PodID{"namespace-1", "pod-1"}
-	testPodID2       = PodID{"namespace-1", "pod-2"}
-	testContainerID1 = ContainerID{testPodID1, "container-1"}
-	testRequest      = Resources{
+	testPodID1  = PodID{"namespace-1", "pod-1"}
+	testPodID2  = PodID{"namespace-1", "pod-2"}
+	testRequest = Resources{
 		ResourceCPU:    CPUAmountFromCores(3.14),
 		ResourceMemory: MemoryAmountFromBytes(3.14e9),
 	}
 )
 
-func addTestCPUSample(cluster *ClusterState, container ContainerID, cpuCores float64) error {
+func addTestCPUSample(cluster ClusterState, container ContainerID, cpuCores float64) error {
 	sample := ContainerUsageSampleWithKey{
 		Container: container,
 		ContainerUsageSample: ContainerUsageSample{
 			MeasureStart: testTimestamp,
 			Usage:        CPUAmountFromCores(cpuCores),
-			Request:      testRequest[ResourceCPU],
 			Resource:     ResourceCPU,
 		},
 	}
 	return cluster.AddSample(&sample)
 }
 
-func addTestMemorySample(cluster *ClusterState, container ContainerID, memoryBytes float64) error {
+func addTestMemorySample(cluster ClusterState, container ContainerID, memoryBytes float64) error {
 	sample := ContainerUsageSampleWithKey{
 		Container: container,
 		ContainerUsageSample: ContainerUsageSample{
 			MeasureStart: testTimestamp,
 			Usage:        MemoryAmountFromBytes(memoryBytes),
-			Request:      testRequest[ResourceMemory],
 			Resource:     ResourceMemory,
 		},
 	}
@@ -65,8 +63,10 @@ func addTestMemorySample(cluster *ClusterState, container ContainerID, memoryByt
 }
 
 // Creates two pods, each having two containers:
-//   testPodID1: { 'app-A', 'app-B' }
-//   testPodID2: { 'app-A', 'app-C' }
+//
+//	testPodID1: { 'app-A', 'app-B' }
+//	testPodID2: { 'app-A', 'app-C' }
+//
 // Adds a few usage samples to the containers.
 // Verifies that AggregateStateByContainerName() properly aggregates
 // container CPU and memory peak histograms, grouping the two containers
@@ -141,7 +141,7 @@ func TestAggregateContainerStateSaveToCheckpoint(t *testing.T) {
 
 	assert.NoError(t, err)
 
-	assert.True(t, time.Now().Sub(checkpoint.LastUpdateTime.Time) < 10*time.Second)
+	assert.True(t, time.Since(checkpoint.LastUpdateTime.Time) < 10*time.Second)
 	assert.Equal(t, t1, checkpoint.FirstSampleStart.Time)
 	assert.Equal(t, t2, checkpoint.LastSampleStart.Time)
 	assert.Equal(t, 10, checkpoint.TotalSamplesCount)

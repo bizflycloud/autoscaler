@@ -20,13 +20,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	labels "k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/labels"
+
 	vpa_types "k8s.io/autoscaler/vertical-pod-autoscaler/pkg/apis/autoscaling.k8s.io/v1"
 	"k8s.io/autoscaler/vertical-pod-autoscaler/pkg/utils/test"
-
-	"github.com/stretchr/testify/assert"
 )
 
 var (
@@ -119,7 +119,7 @@ func TestUpdateConditions(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			containerName := "container"
-			vpa := NewVpa(VpaID{Namespace: "test-namespace", VpaName: "my-facourite-vpa"}, labels.Nothing(), time.Unix(0, 0))
+			vpa := NewVpa(VpaID{Namespace: "test-namespace", VpaName: "my-favourite-vpa"}, labels.Nothing(), time.Unix(0, 0))
 			if tc.hasRecommendation {
 				vpa.Recommendation = test.Recommendation().WithContainer(containerName).WithTarget("5", "200").Get()
 			}
@@ -193,7 +193,7 @@ func TestUpdateRecommendation(t *testing.T) {
 			for container, rec := range tc.containers {
 				state := &AggregateContainerState{}
 				if rec != nil {
-					state.LastRecommendation = corev1.ResourceList{
+					state.lastRecommendation = corev1.ResourceList{
 						corev1.ResourceCPU:    resource.MustParse(rec.cpu),
 						corev1.ResourceMemory: resource.MustParse(rec.mem),
 					}
@@ -209,9 +209,9 @@ func TestUpdateRecommendation(t *testing.T) {
 			for key, state := range vpa.aggregateContainerStates {
 				expected, ok := tc.expectedLast[key.ContainerName()]
 				if !ok {
-					assert.Nil(t, state.LastRecommendation)
+					assert.Nil(t, state.lastRecommendation)
 				} else {
-					assert.Equal(t, expected, state.LastRecommendation)
+					assert.Equal(t, expected, state.lastRecommendation)
 				}
 			}
 		})

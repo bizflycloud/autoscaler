@@ -1,32 +1,13 @@
-/*
-Copyright 2018 The Kubernetes Authors.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package hcloud
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"net/url"
-	"strconv"
 	"time"
 
+	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/hetzner/hcloud-go/hcloud/exp/ctxutil"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/hetzner/hcloud-go/hcloud/schema"
 )
 
@@ -35,7 +16,10 @@ type NetworkZone string
 
 // List of available Network Zones.
 const (
-	NetworkZoneEUCentral NetworkZone = "eu-central"
+	NetworkZoneEUCentral   NetworkZone = "eu-central"
+	NetworkZoneUSEast      NetworkZone = "us-east"
+	NetworkZoneUSWest      NetworkZone = "us-west"
+	NetworkZoneAPSouthEast NetworkZone = "ap-southeast"
 )
 
 // NetworkSubnetType specifies a type of a subnet.
@@ -43,21 +27,33 @@ type NetworkSubnetType string
 
 // List of available network subnet types.
 const (
-	NetworkSubnetTypeCloud  NetworkSubnetType = "cloud"
+	// Used to connect cloud servers and load balancers.
+	NetworkSubnetTypeCloud NetworkSubnetType = "cloud"
+	// Used to connect cloud servers and load balancers.
+	//
+	// Deprecated: Use [NetworkSubnetTypeCloud] instead.
 	NetworkSubnetTypeServer NetworkSubnetType = "server"
+	// Used to connect cloud servers and load balancers with dedicated servers.
+	//
+	// See https://docs.hetzner.com/cloud/networks/connect-dedi-vswitch/
+	NetworkSubnetTypeVSwitch NetworkSubnetType = "vswitch"
 )
 
 // Network represents a network in the Hetzner Cloud.
 type Network struct {
-	ID         int
-	Name       string
-	Created    time.Time
-	IPRange    *net.IPNet
-	Subnets    []NetworkSubnet
-	Routes     []NetworkRoute
-	Servers    []*Server
-	Protection NetworkProtection
-	Labels     map[string]string
+	ID            int64
+	Name          string
+	Created       time.Time
+	IPRange       *net.IPNet
+	Subnets       []NetworkSubnet
+	Routes        []NetworkRoute
+	Servers       []*Server
+	LoadBalancers []*LoadBalancer
+	Protection    NetworkProtection
+	Labels        map[string]string
+
+	// ExposeRoutesToVSwitch indicates if the routes from this network should be exposed to the vSwitch connection.
+	ExposeRoutesToVSwitch bool
 }
 
 // NetworkSubnet represents a subnet of a network in the Hetzner Cloud.
@@ -66,6 +62,7 @@ type NetworkSubnet struct {
 	IPRange     *net.IPNet
 	NetworkZone NetworkZone
 	Gateway     net.IP
+	VSwitchID   int64
 }
 
 // NetworkRoute represents a route of a network.
@@ -82,57 +79,54 @@ type NetworkProtection struct {
 // NetworkClient is a client for the network API.
 type NetworkClient struct {
 	client *Client
+	Action *ResourceActionClient
 }
 
 // GetByID retrieves a network by its ID. If the network does not exist, nil is returned.
-func (c *NetworkClient) GetByID(ctx context.Context, id int) (*Network, *Response, error) {
-	req, err := c.client.NewRequest(ctx, "GET", fmt.Sprintf("/networks/%d", id), nil)
-	if err != nil {
-		return nil, nil, err
-	}
+func (c *NetworkClient) GetByID(ctx context.Context, id int64) (*Network, *Response, error) {
+	const opPath = "/networks/%d"
+	ctx = ctxutil.SetOpPath(ctx, opPath)
 
-	var body schema.NetworkGetResponse
-	resp, err := c.client.Do(req, &body)
+	reqPath := fmt.Sprintf(opPath, id)
+
+	respBody, resp, err := getRequest[schema.NetworkGetResponse](ctx, c.client, reqPath)
 	if err != nil {
 		if IsError(err, ErrorCodeNotFound) {
 			return nil, resp, nil
 		}
-		return nil, nil, err
+		return nil, resp, err
 	}
-	return NetworkFromSchema(body.Network), resp, nil
+
+	return NetworkFromSchema(respBody.Network), resp, nil
 }
 
 // GetByName retrieves a network by its name. If the network does not exist, nil is returned.
 func (c *NetworkClient) GetByName(ctx context.Context, name string) (*Network, *Response, error) {
-	if name == "" {
-		return nil, nil, nil
-	}
-	Networks, response, err := c.List(ctx, NetworkListOpts{Name: name})
-	if len(Networks) == 0 {
-		return nil, response, err
-	}
-	return Networks[0], response, err
+	return firstByName(name, func() ([]*Network, *Response, error) {
+		return c.List(ctx, NetworkListOpts{Name: name})
+	})
 }
 
 // Get retrieves a network by its ID if the input can be parsed as an integer, otherwise it
 // retrieves a network by its name. If the network does not exist, nil is returned.
 func (c *NetworkClient) Get(ctx context.Context, idOrName string) (*Network, *Response, error) {
-	if id, err := strconv.Atoi(idOrName); err == nil {
-		return c.GetByID(ctx, int(id))
-	}
-	return c.GetByName(ctx, idOrName)
+	return getByIDOrName(ctx, c.GetByID, c.GetByName, idOrName)
 }
 
 // NetworkListOpts specifies options for listing networks.
 type NetworkListOpts struct {
 	ListOpts
 	Name string
+	Sort []string
 }
 
 func (l NetworkListOpts) values() url.Values {
-	vals := l.ListOpts.values()
+	vals := l.ListOpts.Values()
 	if l.Name != "" {
 		vals.Add("name", l.Name)
+	}
+	for _, sort := range l.Sort {
+		vals.Add("sort", sort)
 	}
 	return vals
 }
@@ -142,22 +136,17 @@ func (l NetworkListOpts) values() url.Values {
 // Please note that filters specified in opts are not taken into account
 // when their value corresponds to their zero value or when they are empty.
 func (c *NetworkClient) List(ctx context.Context, opts NetworkListOpts) ([]*Network, *Response, error) {
-	path := "/networks?" + opts.values().Encode()
-	req, err := c.client.NewRequest(ctx, "GET", path, nil)
+	const opPath = "/networks?%s"
+	ctx = ctxutil.SetOpPath(ctx, opPath)
+
+	reqPath := fmt.Sprintf(opPath, opts.values().Encode())
+
+	respBody, resp, err := getRequest[schema.NetworkListResponse](ctx, c.client, reqPath)
 	if err != nil {
-		return nil, nil, err
+		return nil, resp, err
 	}
 
-	var body schema.NetworkListResponse
-	resp, err := c.client.Do(req, &body)
-	if err != nil {
-		return nil, nil, err
-	}
-	Networks := make([]*Network, 0, len(body.Networks))
-	for _, s := range body.Networks {
-		Networks = append(Networks, NetworkFromSchema(s))
-	}
-	return Networks, resp, nil
+	return allFromSchemaFunc(respBody.Networks, NetworkFromSchema), resp, nil
 }
 
 // All returns all networks.
@@ -167,63 +156,53 @@ func (c *NetworkClient) All(ctx context.Context) ([]*Network, error) {
 
 // AllWithOpts returns all networks for the given options.
 func (c *NetworkClient) AllWithOpts(ctx context.Context, opts NetworkListOpts) ([]*Network, error) {
-	var allNetworks []*Network
-
-	_, err := c.client.all(func(page int) (*Response, error) {
+	return iterPages(func(page int) ([]*Network, *Response, error) {
 		opts.Page = page
-		Networks, resp, err := c.List(ctx, opts)
-		if err != nil {
-			return resp, err
-		}
-		allNetworks = append(allNetworks, Networks...)
-		return resp, nil
+		return c.List(ctx, opts)
 	})
-	if err != nil {
-		return nil, err
-	}
-
-	return allNetworks, nil
 }
 
 // Delete deletes a network.
 func (c *NetworkClient) Delete(ctx context.Context, network *Network) (*Response, error) {
-	req, err := c.client.NewRequest(ctx, "DELETE", fmt.Sprintf("/networks/%d", network.ID), nil)
-	if err != nil {
-		return nil, err
-	}
-	return c.client.Do(req, nil)
+	const opPath = "/networks/%d"
+	ctx = ctxutil.SetOpPath(ctx, opPath)
+
+	reqPath := fmt.Sprintf(opPath, network.ID)
+
+	return deleteRequestNoResult(ctx, c.client, reqPath)
 }
 
 // NetworkUpdateOpts specifies options for updating a network.
 type NetworkUpdateOpts struct {
 	Name   string
 	Labels map[string]string
+	// ExposeRoutesToVSwitch indicates if the routes from this network should be exposed to the vSwitch connection.
+	// The exposing only takes effect if a vSwitch connection is active.
+	ExposeRoutesToVSwitch *bool
 }
 
 // Update updates a network.
 func (c *NetworkClient) Update(ctx context.Context, network *Network, opts NetworkUpdateOpts) (*Network, *Response, error) {
+	const opPath = "/networks/%d"
+	ctx = ctxutil.SetOpPath(ctx, opPath)
+
+	reqPath := fmt.Sprintf(opPath, network.ID)
+
 	reqBody := schema.NetworkUpdateRequest{
 		Name: opts.Name,
 	}
 	if opts.Labels != nil {
 		reqBody.Labels = &opts.Labels
 	}
-	reqBodyData, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, nil, err
+	if opts.ExposeRoutesToVSwitch != nil {
+		reqBody.ExposeRoutesToVSwitch = opts.ExposeRoutesToVSwitch
 	}
 
-	path := fmt.Sprintf("/networks/%d", network.ID)
-	req, err := c.client.NewRequest(ctx, "PUT", path, bytes.NewReader(reqBodyData))
-	if err != nil {
-		return nil, nil, err
-	}
-
-	respBody := schema.NetworkUpdateResponse{}
-	resp, err := c.client.Do(req, &respBody)
+	respBody, resp, err := putRequest[schema.NetworkUpdateResponse](ctx, c.client, reqPath, reqBody)
 	if err != nil {
 		return nil, resp, err
 	}
+
 	return NetworkFromSchema(respBody.Network), resp, nil
 }
 
@@ -234,34 +213,47 @@ type NetworkCreateOpts struct {
 	Subnets []NetworkSubnet
 	Routes  []NetworkRoute
 	Labels  map[string]string
+	// ExposeRoutesToVSwitch indicates if the routes from this network should be exposed to the vSwitch connection.
+	// The exposing only takes effect if a vSwitch connection is active.
+	ExposeRoutesToVSwitch bool
 }
 
 // Validate checks if options are valid.
 func (o NetworkCreateOpts) Validate() error {
 	if o.Name == "" {
-		return errors.New("missing name")
+		return missingField(o, "Name")
 	}
 	if o.IPRange == nil || o.IPRange.String() == "" {
-		return errors.New("missing IP range")
+		return missingField(o, "IPRange")
 	}
 	return nil
 }
 
 // Create creates a new network.
 func (c *NetworkClient) Create(ctx context.Context, opts NetworkCreateOpts) (*Network, *Response, error) {
+	const opPath = "/networks"
+	ctx = ctxutil.SetOpPath(ctx, opPath)
+
+	reqPath := opPath
+
 	if err := opts.Validate(); err != nil {
 		return nil, nil, err
 	}
 	reqBody := schema.NetworkCreateRequest{
-		Name:    opts.Name,
-		IPRange: opts.IPRange.String(),
+		Name:                  opts.Name,
+		IPRange:               opts.IPRange.String(),
+		ExposeRoutesToVSwitch: opts.ExposeRoutesToVSwitch,
 	}
 	for _, subnet := range opts.Subnets {
-		reqBody.Subnets = append(reqBody.Subnets, schema.NetworkSubnet{
+		s := schema.NetworkSubnet{
 			Type:        string(subnet.Type),
 			IPRange:     subnet.IPRange.String(),
 			NetworkZone: string(subnet.NetworkZone),
-		})
+		}
+		if subnet.VSwitchID != 0 {
+			s.VSwitchID = subnet.VSwitchID
+		}
+		reqBody.Subnets = append(reqBody.Subnets, s)
 	}
 	for _, route := range opts.Routes {
 		reqBody.Routes = append(reqBody.Routes, schema.NetworkRoute{
@@ -272,20 +264,12 @@ func (c *NetworkClient) Create(ctx context.Context, opts NetworkCreateOpts) (*Ne
 	if opts.Labels != nil {
 		reqBody.Labels = &opts.Labels
 	}
-	reqBodyData, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, nil, err
-	}
-	req, err := c.client.NewRequest(ctx, "POST", "/networks", bytes.NewReader(reqBodyData))
-	if err != nil {
-		return nil, nil, err
-	}
 
-	respBody := schema.NetworkCreateResponse{}
-	resp, err := c.client.Do(req, &respBody)
+	respBody, resp, err := postRequest[schema.NetworkCreateResponse](ctx, c.client, reqPath, reqBody)
 	if err != nil {
 		return nil, resp, err
 	}
+
 	return NetworkFromSchema(respBody.Network), resp, nil
 }
 
@@ -296,25 +280,20 @@ type NetworkChangeIPRangeOpts struct {
 
 // ChangeIPRange changes the IP range of a network.
 func (c *NetworkClient) ChangeIPRange(ctx context.Context, network *Network, opts NetworkChangeIPRangeOpts) (*Action, *Response, error) {
+	const opPath = "/networks/%d/actions/change_ip_range"
+	ctx = ctxutil.SetOpPath(ctx, opPath)
+
+	reqPath := fmt.Sprintf(opPath, network.ID)
+
 	reqBody := schema.NetworkActionChangeIPRangeRequest{
 		IPRange: opts.IPRange.String(),
 	}
-	reqBodyData, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, nil, err
-	}
 
-	path := fmt.Sprintf("/networks/%d/actions/change_ip_range", network.ID)
-	req, err := c.client.NewRequest(ctx, "POST", path, bytes.NewReader(reqBodyData))
-	if err != nil {
-		return nil, nil, err
-	}
-
-	respBody := schema.NetworkActionChangeIPRangeResponse{}
-	resp, err := c.client.Do(req, &respBody)
+	respBody, resp, err := postRequest[schema.NetworkActionChangeIPRangeResponse](ctx, c.client, reqPath, reqBody)
 	if err != nil {
 		return nil, resp, err
 	}
+
 	return ActionFromSchema(respBody.Action), resp, nil
 }
 
@@ -325,6 +304,11 @@ type NetworkAddSubnetOpts struct {
 
 // AddSubnet adds a subnet to a network.
 func (c *NetworkClient) AddSubnet(ctx context.Context, network *Network, opts NetworkAddSubnetOpts) (*Action, *Response, error) {
+	const opPath = "/networks/%d/actions/add_subnet"
+	ctx = ctxutil.SetOpPath(ctx, opPath)
+
+	reqPath := fmt.Sprintf(opPath, network.ID)
+
 	reqBody := schema.NetworkActionAddSubnetRequest{
 		Type:        string(opts.Subnet.Type),
 		NetworkZone: string(opts.Subnet.NetworkZone),
@@ -332,22 +316,15 @@ func (c *NetworkClient) AddSubnet(ctx context.Context, network *Network, opts Ne
 	if opts.Subnet.IPRange != nil {
 		reqBody.IPRange = opts.Subnet.IPRange.String()
 	}
-	reqBodyData, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, nil, err
+	if opts.Subnet.VSwitchID != 0 {
+		reqBody.VSwitchID = opts.Subnet.VSwitchID
 	}
 
-	path := fmt.Sprintf("/networks/%d/actions/add_subnet", network.ID)
-	req, err := c.client.NewRequest(ctx, "POST", path, bytes.NewReader(reqBodyData))
-	if err != nil {
-		return nil, nil, err
-	}
-
-	respBody := schema.NetworkActionAddSubnetResponse{}
-	resp, err := c.client.Do(req, &respBody)
+	respBody, resp, err := postRequest[schema.NetworkActionAddSubnetResponse](ctx, c.client, reqPath, reqBody)
 	if err != nil {
 		return nil, resp, err
 	}
+
 	return ActionFromSchema(respBody.Action), resp, nil
 }
 
@@ -358,25 +335,20 @@ type NetworkDeleteSubnetOpts struct {
 
 // DeleteSubnet deletes a subnet from a network.
 func (c *NetworkClient) DeleteSubnet(ctx context.Context, network *Network, opts NetworkDeleteSubnetOpts) (*Action, *Response, error) {
+	const opPath = "/networks/%d/actions/delete_subnet"
+	ctx = ctxutil.SetOpPath(ctx, opPath)
+
+	reqPath := fmt.Sprintf(opPath, network.ID)
+
 	reqBody := schema.NetworkActionDeleteSubnetRequest{
 		IPRange: opts.Subnet.IPRange.String(),
 	}
-	reqBodyData, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, nil, err
-	}
 
-	path := fmt.Sprintf("/networks/%d/actions/delete_subnet", network.ID)
-	req, err := c.client.NewRequest(ctx, "POST", path, bytes.NewReader(reqBodyData))
-	if err != nil {
-		return nil, nil, err
-	}
-
-	respBody := schema.NetworkActionDeleteSubnetResponse{}
-	resp, err := c.client.Do(req, &respBody)
+	respBody, resp, err := postRequest[schema.NetworkActionDeleteSubnetResponse](ctx, c.client, reqPath, reqBody)
 	if err != nil {
 		return nil, resp, err
 	}
+
 	return ActionFromSchema(respBody.Action), resp, nil
 }
 
@@ -387,26 +359,21 @@ type NetworkAddRouteOpts struct {
 
 // AddRoute adds a route to a network.
 func (c *NetworkClient) AddRoute(ctx context.Context, network *Network, opts NetworkAddRouteOpts) (*Action, *Response, error) {
+	const opPath = "/networks/%d/actions/add_route"
+	ctx = ctxutil.SetOpPath(ctx, opPath)
+
+	reqPath := fmt.Sprintf(opPath, network.ID)
+
 	reqBody := schema.NetworkActionAddRouteRequest{
 		Destination: opts.Route.Destination.String(),
 		Gateway:     opts.Route.Gateway.String(),
 	}
-	reqBodyData, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, nil, err
-	}
 
-	path := fmt.Sprintf("/networks/%d/actions/add_route", network.ID)
-	req, err := c.client.NewRequest(ctx, "POST", path, bytes.NewReader(reqBodyData))
-	if err != nil {
-		return nil, nil, err
-	}
-
-	respBody := schema.NetworkActionAddSubnetResponse{}
-	resp, err := c.client.Do(req, &respBody)
+	respBody, resp, err := postRequest[schema.NetworkActionAddRouteResponse](ctx, c.client, reqPath, reqBody)
 	if err != nil {
 		return nil, resp, err
 	}
+
 	return ActionFromSchema(respBody.Action), resp, nil
 }
 
@@ -417,26 +384,21 @@ type NetworkDeleteRouteOpts struct {
 
 // DeleteRoute deletes a route from a network.
 func (c *NetworkClient) DeleteRoute(ctx context.Context, network *Network, opts NetworkDeleteRouteOpts) (*Action, *Response, error) {
+	const opPath = "/networks/%d/actions/delete_route"
+	ctx = ctxutil.SetOpPath(ctx, opPath)
+
+	reqPath := fmt.Sprintf(opPath, network.ID)
+
 	reqBody := schema.NetworkActionDeleteRouteRequest{
 		Destination: opts.Route.Destination.String(),
 		Gateway:     opts.Route.Gateway.String(),
 	}
-	reqBodyData, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, nil, err
-	}
 
-	path := fmt.Sprintf("/networks/%d/actions/delete_route", network.ID)
-	req, err := c.client.NewRequest(ctx, "POST", path, bytes.NewReader(reqBodyData))
-	if err != nil {
-		return nil, nil, err
-	}
-
-	respBody := schema.NetworkActionDeleteSubnetResponse{}
-	resp, err := c.client.Do(req, &respBody)
+	respBody, resp, err := postRequest[schema.NetworkActionDeleteRouteResponse](ctx, c.client, reqPath, reqBody)
 	if err != nil {
 		return nil, resp, err
 	}
+
 	return ActionFromSchema(respBody.Action), resp, nil
 }
 
@@ -447,24 +409,19 @@ type NetworkChangeProtectionOpts struct {
 
 // ChangeProtection changes the resource protection level of a network.
 func (c *NetworkClient) ChangeProtection(ctx context.Context, network *Network, opts NetworkChangeProtectionOpts) (*Action, *Response, error) {
+	const opPath = "/networks/%d/actions/change_protection"
+	ctx = ctxutil.SetOpPath(ctx, opPath)
+
+	reqPath := fmt.Sprintf(opPath, network.ID)
+
 	reqBody := schema.NetworkActionChangeProtectionRequest{
 		Delete: opts.Delete,
 	}
-	reqBodyData, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, nil, err
-	}
 
-	path := fmt.Sprintf("/networks/%d/actions/change_protection", network.ID)
-	req, err := c.client.NewRequest(ctx, "POST", path, bytes.NewReader(reqBodyData))
-	if err != nil {
-		return nil, nil, err
-	}
-
-	respBody := schema.NetworkActionChangeProtectionResponse{}
-	resp, err := c.client.Do(req, &respBody)
+	respBody, resp, err := postRequest[schema.NetworkActionChangeProtectionResponse](ctx, c.client, reqPath, reqBody)
 	if err != nil {
 		return nil, resp, err
 	}
-	return ActionFromSchema(respBody.Action), resp, err
+
+	return ActionFromSchema(respBody.Action), resp, nil
 }

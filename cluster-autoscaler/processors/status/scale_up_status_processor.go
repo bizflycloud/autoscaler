@@ -66,6 +66,8 @@ const (
 	ScaleUpNotTried
 	// ScaleUpInCooldown - the scale up wasn't even attempted, because it's in a cooldown state (it's suspended for a scheduled period of time).
 	ScaleUpInCooldown
+	// ScaleUpLimitedByMaxNodesTotal - the scale up wasn't attempted, because the cluster reached max nodes total
+	ScaleUpLimitedByMaxNodesTotal
 )
 
 // WasSuccessful returns true if the scale-up was successful.
@@ -98,4 +100,48 @@ func (p *NoOpScaleUpStatusProcessor) Process(context *context.AutoscalingContext
 
 // CleanUp cleans up the processor's internal structures.
 func (p *NoOpScaleUpStatusProcessor) CleanUp() {
+}
+
+// CombinedScaleUpStatusProcessor is a list of ScaleUpStatusProcessor
+type CombinedScaleUpStatusProcessor struct {
+	processors []ScaleUpStatusProcessor
+}
+
+// NewCombinedScaleUpStatusProcessor construct CombinedScaleUpStatusProcessor.
+func NewCombinedScaleUpStatusProcessor(processors []ScaleUpStatusProcessor) *CombinedScaleUpStatusProcessor {
+	var scaleUpProcessors []ScaleUpStatusProcessor
+	for _, processor := range processors {
+		if processor != nil {
+			scaleUpProcessors = append(scaleUpProcessors, processor)
+		}
+	}
+	return &CombinedScaleUpStatusProcessor{scaleUpProcessors}
+}
+
+// AddProcessor append processor to the list.
+func (p *CombinedScaleUpStatusProcessor) AddProcessor(processor ScaleUpStatusProcessor) {
+	if processor != nil {
+		p.processors = append(p.processors, processor)
+	}
+}
+
+// Process runs sub-processors sequentially in the same order of addition
+func (p *CombinedScaleUpStatusProcessor) Process(ctx *context.AutoscalingContext, status *ScaleUpStatus) {
+	for _, processor := range p.processors {
+		processor.Process(ctx, status)
+	}
+}
+
+// CleanUp cleans up the processor's internal structures.
+func (p *CombinedScaleUpStatusProcessor) CleanUp() {
+	for _, processor := range p.processors {
+		processor.CleanUp()
+	}
+}
+
+// UpdateScaleUpError updates ScaleUpStatus.
+func UpdateScaleUpError(s *ScaleUpStatus, err errors.AutoscalerError) (*ScaleUpStatus, errors.AutoscalerError) {
+	s.ScaleUpError = &err
+	s.Result = ScaleUpError
+	return s, err
 }

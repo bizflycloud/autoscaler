@@ -20,6 +20,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	v1 "k8s.io/api/core/v1"
 )
 
 // NodePool defines the nodes group deployed on OVHcloud
@@ -44,6 +46,19 @@ type NodePool struct {
 	UpToDateNodes  uint32 `json:"upToDateNodes"`
 
 	Autoscaling *NodePoolAutoscaling `json:"autoscaling,omitempty"`
+
+	Template struct {
+		Metadata struct {
+			Labels      map[string]string `json:"labels"`
+			Annotations map[string]string `json:"annotations"`
+			Finalizers  []string          `json:"finalizers"`
+		} `json:"metadata"`
+
+		Spec struct {
+			Unschedulable bool       `json:"unschedulable"`
+			Taints        []v1.Taint `json:"taints"`
+		} `json:"spec"`
+	} `json:"template"`
 
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
@@ -74,6 +89,7 @@ func (c *Client) ListNodePools(ctx context.Context, projectID, clusterID string)
 		nil,
 		&nodepools,
 		nil,
+		nil,
 		true,
 	)
 }
@@ -89,6 +105,7 @@ func (c *Client) GetNodePool(ctx context.Context, projectID string, clusterID st
 		nil,
 		&nodepool,
 		nil,
+		nil,
 		true,
 	)
 }
@@ -103,6 +120,7 @@ func (c *Client) ListNodePoolNodes(ctx context.Context, projectID string, cluste
 		fmt.Sprintf("/cloud/project/%s/kube/%s/nodepool/%s/nodes", projectID, clusterID, poolID),
 		nil,
 		&nodes,
+		nil,
 		nil,
 		true,
 	)
@@ -133,6 +151,7 @@ func (c *Client) CreateNodePool(ctx context.Context, projectID string, clusterID
 		opts,
 		&nodepool,
 		nil,
+		nil,
 		true,
 	)
 }
@@ -159,6 +178,7 @@ func (c *Client) UpdateNodePool(ctx context.Context, projectID string, clusterID
 		opts,
 		&nodepool,
 		nil,
+		nil,
 		true,
 	)
 }
@@ -173,6 +193,7 @@ func (c *Client) DeleteNodePool(ctx context.Context, projectID string, clusterID
 		fmt.Sprintf("/cloud/project/%s/kube/%s/nodepool/%s", projectID, clusterID, poolID),
 		nil,
 		&nodepool,
+		nil,
 		nil,
 		true,
 	)

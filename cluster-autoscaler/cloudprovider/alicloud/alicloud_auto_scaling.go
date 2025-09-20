@@ -17,6 +17,7 @@ limitations under the License.
 package alicloud
 
 import (
+	"encoding/json"
 	"fmt"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/alicloud/alibaba-cloud-sdk-go/sdk/requests"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/alicloud/alibaba-cloud-sdk-go/services/ess"
@@ -28,9 +29,11 @@ const (
 	refreshClientInterval   = 60 * time.Minute
 	acsAutogenIncreaseRules = "acs-autogen-increase-rules"
 	defaultAdjustmentType   = "TotalCapacity"
+	defaultRequestPageSize  = 10
+	alicloudManaged         = "cluster-autoscaler/alicloud/managed"
 )
 
-//autoScaling define the interface usage in alibaba-cloud-sdk-go.
+// autoScaling define the interface usage in alibaba-cloud-sdk-go.
 type autoScaling interface {
 	DescribeScalingGroups(req *ess.DescribeScalingGroupsRequest) (*ess.DescribeScalingGroupsResponse, error)
 	DescribeScalingConfigurations(req *ess.DescribeScalingConfigurationsRequest) (*ess.DescribeScalingConfigurationsResponse, error)
@@ -40,6 +43,7 @@ type autoScaling interface {
 	ModifyScalingGroup(req *ess.ModifyScalingGroupRequest) (*ess.ModifyScalingGroupResponse, error)
 	RemoveInstances(req *ess.RemoveInstancesRequest) (*ess.RemoveInstancesResponse, error)
 	ExecuteScalingRule(req *ess.ExecuteScalingRuleRequest) (*ess.ExecuteScalingRuleResponse, error)
+	ScaleWithAdjustment(req *ess.ScaleWithAdjustmentRequest) (*ess.ScaleWithAdjustmentResponse, error)
 	ModifyScalingRule(req *ess.ModifyScalingRuleRequest) (*ess.ModifyScalingRuleResponse, error)
 	DeleteScalingRule(req *ess.DeleteScalingRuleRequest) (*ess.DeleteScalingRuleResponse, error)
 }
@@ -52,7 +56,7 @@ func newAutoScalingWrapper(cfg *cloudConfig) (*autoScalingWrapper, error) {
 	asw := &autoScalingWrapper{
 		cfg: cfg,
 	}
-	if cfg.STSEnabled == true {
+	if cfg.STSEnabled {
 		go func(asw *autoScalingWrapper, cfg *cloudConfig) {
 			timer := time.NewTicker(refreshClientInterval)
 			defer timer.Stop()
@@ -76,7 +80,7 @@ func newAutoScalingWrapper(cfg *cloudConfig) (*autoScalingWrapper, error) {
 
 func getEssClient(cfg *cloudConfig) (client *ess.Client, err error) {
 	region := cfg.getRegion()
-	if cfg.STSEnabled == true {
+	if cfg.STSEnabled {
 		auth, err := cfg.getSTSToken()
 		if err != nil {
 			klog.Errorf("Failed to get sts token from metadata,Because of %s", err.Error())
@@ -85,6 +89,11 @@ func getEssClient(cfg *cloudConfig) (client *ess.Client, err error) {
 		client, err = ess.NewClientWithStsToken(region, auth.AccessKeyId, auth.AccessKeySecret, auth.SecurityToken)
 		if err != nil {
 			klog.Errorf("Failed to create client with sts in metadata because of %s", err.Error())
+		}
+	} else if cfg.RRSAEnabled {
+		client, err = ess.NewClientWithRRSA(region, cfg.RoleARN, cfg.OIDCProviderARN, cfg.OIDCTokenFilePath, cfg.RoleSessionName)
+		if err != nil {
+			klog.Errorf("Failed to create ess client with RRSA, because of %s", err.Error())
 		}
 	} else {
 		client, err = ess.NewClientWithAccessKey(region, cfg.AccessKeyID, cfg.AccessKeySecret)
@@ -95,7 +104,7 @@ func getEssClient(cfg *cloudConfig) (client *ess.Client, err error) {
 	return
 }
 
-//autoScalingWrapper will serve as the
+// autoScalingWrapper will serve as the
 type autoScalingWrapper struct {
 	autoScaling
 	cfg *cloudConfig
@@ -126,7 +135,7 @@ func (m autoScalingWrapper) getScalingGroupConfigurationByID(configID string, as
 
 func (m autoScalingWrapper) getScalingGroupByID(groupID string) (*ess.ScalingGroup, error) {
 	params := ess.CreateDescribeScalingGroupsRequest()
-	params.ScalingGroupId1 = groupID
+	params.ScalingGroupId = &[]string{groupID}
 
 	resp, err := m.DescribeScalingGroups(params)
 	if err != nil {
@@ -161,75 +170,60 @@ func (m autoScalingWrapper) getScalingGroupByName(groupName string) (*ess.Scalin
 }
 
 func (m autoScalingWrapper) getScalingInstancesByGroup(asgId string) ([]ess.ScalingInstance, error) {
-	params := ess.CreateDescribeScalingInstancesRequest()
-	params.ScalingGroupId = asgId
-	resp, err := m.DescribeScalingInstances(params)
-	if err != nil {
-		klog.Errorf("failed to request scaling instances for %s,Because of %s", asgId, err.Error())
-		return nil, err
+	instances := make([]ess.ScalingInstance, 0)
+	pageNumber := 1
+
+	for {
+		params := ess.CreateDescribeScalingInstancesRequest()
+		params.ScalingGroupId = asgId
+		params.PageNumber = requests.NewInteger(pageNumber)
+		params.PageSize = requests.NewInteger(defaultRequestPageSize)
+		resp, err := m.DescribeScalingInstances(params)
+		if err != nil {
+			klog.Errorf("failed to request scaling instances for %s,Because of %s", asgId, err.Error())
+			return nil, err
+		}
+		instances = append(instances, resp.ScalingInstances.ScalingInstance...)
+
+		if pageNumber*defaultRequestPageSize >= resp.TotalCount {
+			break
+		}
+		pageNumber += 1
+		time.Sleep(sdkCoolDownTimeout)
 	}
-	return resp.ScalingInstances.ScalingInstance, nil
+
+	return instances, nil
 }
 
-func (m autoScalingWrapper) setCapcityInstanceSize(groupId string, capcityInstanceSize int64) error {
-	var (
-		ruleId         string
-		scalingRuleAri string
-	)
-	req := ess.CreateDescribeScalingRulesRequest()
-	req.RegionId = m.cfg.getRegion()
+func (m autoScalingWrapper) setCapacityInstanceSize(groupId string, capcityInstanceSize int64) error {
+	req := ess.CreateScaleWithAdjustmentRequest()
+	//req.RegionId = m.cfg.GetRegion()
 	req.ScalingGroupId = groupId
-	req.ScalingRuleName1 = acsAutogenIncreaseRules
-	resp, err := m.DescribeScalingRules(req)
-	if err != nil {
-		//need to handle
-		return err
-	}
+	req.AdjustmentType = defaultAdjustmentType
+	req.AdjustmentValue = requests.NewInteger64(capcityInstanceSize)
+	req.SyncActivity = requests.NewBoolean(true)
+	tmpBytes, _ := json.Marshal(map[string]string{alicloudManaged: "true"})
+	req.ActivityMetadata = string(tmpBytes)
 
-	defer func() {
-		deleteReq := ess.CreateDeleteScalingRuleRequest()
-		deleteReq.ScalingRuleId = ruleId
-		deleteReq.RegionId = m.cfg.getRegion()
-		_, err := m.DeleteScalingRule(deleteReq)
-		if err != nil {
-			klog.Warningf("failed to clean scaling group rules,Because of %s", err.Error())
-		}
-	}()
-
-	if len(resp.ScalingRules.ScalingRule) == 0 {
-		//found the specific rules
-		createReq := ess.CreateCreateScalingRuleRequest()
-		createReq.RegionId = m.cfg.getRegion()
-		createReq.ScalingGroupId = groupId
-		createReq.AdjustmentType = defaultAdjustmentType
-		createReq.AdjustmentValue = requests.NewInteger64(capcityInstanceSize)
-		resp, err := m.CreateScalingRule(createReq)
-		if err != nil {
-			return err
-		}
-		ruleId = resp.ScalingRuleId
-		scalingRuleAri = resp.ScalingRuleAri
-	} else {
-		ruleId = resp.ScalingRules.ScalingRule[0].ScalingRuleId
-		scalingRuleAri = resp.ScalingRules.ScalingRule[0].ScalingRuleAri
-	}
-
-	modifyReq := ess.CreateModifyScalingRuleRequest()
-	modifyReq.RegionId = m.cfg.getRegion()
-	modifyReq.ScalingRuleId = ruleId
-	modifyReq.AdjustmentType = defaultAdjustmentType
-	modifyReq.AdjustmentValue = requests.NewInteger64(capcityInstanceSize)
-	_, err = m.ModifyScalingRule(modifyReq)
+	resp, err := m.ScaleWithAdjustment(req)
 	if err != nil {
 		return err
 	}
-	executeReq := ess.CreateExecuteScalingRuleRequest()
-	executeReq.RegionId = m.cfg.getRegion()
-	executeReq.ScalingRuleAri = scalingRuleAri
-
-	_, err = m.ExecuteScalingRule(executeReq)
-	if err != nil {
-		return err
+	if resp == nil {
+		// not expect go here, in this case error should not be empty
+		klog.Warningf("scaling group %s scaled to be %d with empty error & empty response", groupId, capcityInstanceSize)
+		return nil
 	}
+	if resp.ScalingActivityId == "" {
+		klog.Warningf("scale scaling group %s scaled size to be %d with request id %s but empty scaling activity id", groupId, capcityInstanceSize, resp.RequestId)
+	}
+
+	// only desired capacity changed
+	if resp.ActivityType == "CapacityChange" {
+		klog.Warningf("scaling group %s scaled to be %d only desired capacity changed with activity id %s with request id %s", groupId, capcityInstanceSize, resp.ScalingActivityId, resp.RequestId)
+		return nil
+	}
+	// succeed with activity id
+	klog.Infof("scaling group %s succeed scaled to be %d with activity id %s with request id %s", groupId, capcityInstanceSize, resp.ScalingActivityId, resp.RequestId)
 	return nil
 }

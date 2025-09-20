@@ -19,10 +19,11 @@ package history
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/api"
 	prometheusv1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	prommodel "github.com/prometheus/common/model"
 	"github.com/stretchr/testify/assert"
@@ -59,59 +60,83 @@ type mockPrometheusAPI struct {
 	mock.Mock
 }
 
-func (m mockPrometheusAPI) AlertManagers(ctx context.Context) (prometheusv1.AlertManagersResult, error) {
+func (m *mockPrometheusAPI) AlertManagers(ctx context.Context) (prometheusv1.AlertManagersResult, error) {
 	panic("not implemented")
 }
 
-func (m mockPrometheusAPI) Alerts(ctx context.Context) (prometheusv1.AlertsResult, error) {
+func (m *mockPrometheusAPI) Alerts(ctx context.Context) (prometheusv1.AlertsResult, error) {
 	panic("not implemented")
 }
 
-func (m mockPrometheusAPI) CleanTombstones(ctx context.Context) error {
+func (m *mockPrometheusAPI) CleanTombstones(ctx context.Context) error {
 	panic("not implemented")
 }
 
-func (m mockPrometheusAPI) Config(ctx context.Context) (prometheusv1.ConfigResult, error) {
+func (m *mockPrometheusAPI) Config(ctx context.Context) (prometheusv1.ConfigResult, error) {
 	panic("not implemented")
 }
 
-func (m mockPrometheusAPI) DeleteSeries(ctx context.Context, matches []string, startTime time.Time, endTime time.Time) error {
+func (m *mockPrometheusAPI) DeleteSeries(ctx context.Context, matches []string, startTime time.Time, endTime time.Time) error {
 	panic("not implemented")
 }
 
-func (m mockPrometheusAPI) Flags(ctx context.Context) (prometheusv1.FlagsResult, error) {
+func (m *mockPrometheusAPI) Flags(ctx context.Context) (prometheusv1.FlagsResult, error) {
 	panic("not implemented")
 }
 
-func (m mockPrometheusAPI) LabelNames(ctx context.Context) ([]string, error) {
+func (m *mockPrometheusAPI) LabelNames(ctx context.Context, matches []string, startTime time.Time, endTime time.Time, opts ...prometheusv1.Option) ([]string, prometheusv1.Warnings, error) {
 	panic("not implemented")
 }
 
-func (m mockPrometheusAPI) LabelValues(ctx context.Context, label string) (prommodel.LabelValues, error) {
+func (m *mockPrometheusAPI) LabelValues(ctx context.Context, label string, matches []string, startTime time.Time, endTime time.Time, opts ...prometheusv1.Option) (prommodel.LabelValues, prometheusv1.Warnings, error) {
 	panic("not implemented")
 }
 
-func (m mockPrometheusAPI) Series(ctx context.Context, matches []string, startTime time.Time, endTime time.Time) ([]prommodel.LabelSet, api.Warnings, error) {
+func (m *mockPrometheusAPI) Series(ctx context.Context, matches []string, startTime time.Time, endTime time.Time, opts ...prometheusv1.Option) ([]prommodel.LabelSet, prometheusv1.Warnings, error) {
 	panic("not implemented")
 }
 
-func (m mockPrometheusAPI) Rules(ctx context.Context) (prometheusv1.RulesResult, error) {
+func (m *mockPrometheusAPI) Rules(ctx context.Context) (prometheusv1.RulesResult, error) {
 	panic("not implemented")
 }
 
-func (m mockPrometheusAPI) Snapshot(ctx context.Context, skipHead bool) (prometheusv1.SnapshotResult, error) {
+func (m *mockPrometheusAPI) Snapshot(ctx context.Context, skipHead bool) (prometheusv1.SnapshotResult, error) {
 	panic("not implemented")
 }
 
-func (m mockPrometheusAPI) Targets(ctx context.Context) (prometheusv1.TargetsResult, error) {
+func (m *mockPrometheusAPI) Targets(ctx context.Context) (prometheusv1.TargetsResult, error) {
 	panic("not implemented")
 }
 
-func (m mockPrometheusAPI) TargetsMetadata(ctx context.Context, _, _, _ string) ([]prometheusv1.MetricMetadata, error) {
+func (m *mockPrometheusAPI) TargetsMetadata(ctx context.Context, _, _, _ string) ([]prometheusv1.MetricMetadata, error) {
 	panic("not implemented")
 }
 
-func (m mockPrometheusAPI) Query(ctx context.Context, query string, ts time.Time) (prommodel.Value, api.Warnings, error) {
+func (m *mockPrometheusAPI) Buildinfo(ctx context.Context) (prometheusv1.BuildinfoResult, error) {
+	panic("not implemented")
+}
+
+func (m *mockPrometheusAPI) Metadata(ctx context.Context, metric string, limit string) (map[string][]prometheusv1.Metadata, error) {
+	panic("not implemented")
+}
+
+func (m *mockPrometheusAPI) QueryExemplars(ctx context.Context, query string, startTime time.Time, endTime time.Time) ([]prometheusv1.ExemplarQueryResult, error) {
+	panic("not implemented")
+}
+
+func (m *mockPrometheusAPI) Runtimeinfo(ctx context.Context) (prometheusv1.RuntimeinfoResult, error) {
+	panic("not implemented")
+}
+
+func (m *mockPrometheusAPI) TSDB(ctx context.Context, opts ...prometheusv1.Option) (prometheusv1.TSDBResult, error) {
+	panic("not implemented")
+}
+
+func (m *mockPrometheusAPI) WalReplay(ctx context.Context) (prometheusv1.WalReplayStatus, error) {
+	panic("not implemented")
+}
+
+func (m *mockPrometheusAPI) Query(ctx context.Context, query string, ts time.Time, opts ...prometheusv1.Option) (prommodel.Value, prometheusv1.Warnings, error) {
 	args := m.Called(ctx, query, ts)
 	var returnArg prommodel.Value
 	if args.Get(0) != nil {
@@ -120,7 +145,7 @@ func (m mockPrometheusAPI) Query(ctx context.Context, query string, ts time.Time
 	return returnArg, nil, args.Error(1)
 }
 
-func (m mockPrometheusAPI) QueryRange(ctx context.Context, query string, r prometheusv1.Range) (prommodel.Value, api.Warnings, error) {
+func (m *mockPrometheusAPI) QueryRange(ctx context.Context, query string, r prometheusv1.Range, opts ...prometheusv1.Option) (prommodel.Value, prometheusv1.Warnings, error) {
 	args := m.Called(ctx, query, r)
 	var returnArg prommodel.Value
 	if args.Get(0) != nil {
@@ -321,4 +346,56 @@ func TestGetLabels(t *testing.T) {
 	histories, err := historyProvider.GetClusterHistory()
 	assert.Nil(t, err)
 	assert.Equal(t, histories, map[model.PodID]*PodHistory{podID: podHistory})
+}
+
+func TestPrometheusAuth(t *testing.T) {
+	var capturedRequest *http.Request
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedRequest = r
+		_, _ = w.Write([]byte(`{"status": "success","data": {"resultType": "matrix","result": []}}`))
+	}))
+	defer ts.Close()
+
+	cfg := PrometheusHistoryProviderConfig{
+		Address:           ts.URL,
+		Insecure:          true,
+		HistoryLength:     "8d",
+		HistoryResolution: "30s",
+		QueryTimeout:      30 * time.Second,
+	}
+
+	t.Run("Basic auth", func(t *testing.T) {
+		cfg.Authentication.Username = "user"
+		cfg.Authentication.Password = "password"
+
+		prov, _ := NewPrometheusHistoryProvider(cfg)
+		_, err := prov.GetClusterHistory()
+
+		assert.Nil(t, err)
+		assert.Equal(t, capturedRequest.Header.Get("Authorization"), "Basic dXNlcjpwYXNzd29yZA==") // "user:password"
+	})
+
+	t.Run("Bearer token auth", func(t *testing.T) {
+		cfg.Authentication.BearerToken = "token"
+
+		prov, _ := NewPrometheusHistoryProvider(cfg)
+		_, err := prov.GetClusterHistory()
+
+		assert.Nil(t, err)
+		assert.Equal(t, capturedRequest.Header.Get("Authorization"), "Bearer token")
+	})
+
+	t.Run("Basic auth and Bearer token auth are set at once", func(t *testing.T) {
+		// if both auth methods are set we prefer Bearer token
+		cfg.Authentication.BearerToken = "token"
+		cfg.Authentication.Username = "user"
+		cfg.Authentication.Password = "password"
+
+		prov, _ := NewPrometheusHistoryProvider(cfg)
+		_, err := prov.GetClusterHistory()
+
+		assert.Nil(t, err)
+		assert.NotContains(t, capturedRequest.Header.Get("Authorization"), "Basic")
+		assert.Equal(t, capturedRequest.Header.Get("Authorization"), "Bearer token")
+	})
 }

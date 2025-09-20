@@ -1,37 +1,18 @@
-/*
-Copyright 2018 The Kubernetes Authors.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package hcloud
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"net/url"
-	"strconv"
 	"time"
 
+	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/hetzner/hcloud-go/hcloud/exp/ctxutil"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/hetzner/hcloud-go/hcloud/schema"
 )
 
 // SSHKey represents a SSH key in the Hetzner Cloud.
 type SSHKey struct {
-	ID          int
+	ID          int64
 	Name        string
 	Fingerprint string
 	PublicKey   string
@@ -45,51 +26,41 @@ type SSHKeyClient struct {
 }
 
 // GetByID retrieves a SSH key by its ID. If the SSH key does not exist, nil is returned.
-func (c *SSHKeyClient) GetByID(ctx context.Context, id int) (*SSHKey, *Response, error) {
-	req, err := c.client.NewRequest(ctx, "GET", fmt.Sprintf("/ssh_keys/%d", id), nil)
-	if err != nil {
-		return nil, nil, err
-	}
+func (c *SSHKeyClient) GetByID(ctx context.Context, id int64) (*SSHKey, *Response, error) {
+	const opPath = "/ssh_keys/%d"
+	ctx = ctxutil.SetOpPath(ctx, opPath)
 
-	var body schema.SSHKeyGetResponse
-	resp, err := c.client.Do(req, &body)
+	reqPath := fmt.Sprintf(opPath, id)
+
+	respBody, resp, err := getRequest[schema.SSHKeyGetResponse](ctx, c.client, reqPath)
 	if err != nil {
 		if IsError(err, ErrorCodeNotFound) {
 			return nil, resp, nil
 		}
-		return nil, nil, err
+		return nil, resp, err
 	}
-	return SSHKeyFromSchema(body.SSHKey), resp, nil
+
+	return SSHKeyFromSchema(respBody.SSHKey), resp, nil
 }
 
 // GetByName retrieves a SSH key by its name. If the SSH key does not exist, nil is returned.
 func (c *SSHKeyClient) GetByName(ctx context.Context, name string) (*SSHKey, *Response, error) {
-	if name == "" {
-		return nil, nil, nil
-	}
-	sshKeys, response, err := c.List(ctx, SSHKeyListOpts{Name: name})
-	if len(sshKeys) == 0 {
-		return nil, response, err
-	}
-	return sshKeys[0], response, err
+	return firstByName(name, func() ([]*SSHKey, *Response, error) {
+		return c.List(ctx, SSHKeyListOpts{Name: name})
+	})
 }
 
 // GetByFingerprint retreives a SSH key by its fingerprint. If the SSH key does not exist, nil is returned.
 func (c *SSHKeyClient) GetByFingerprint(ctx context.Context, fingerprint string) (*SSHKey, *Response, error) {
-	sshKeys, response, err := c.List(ctx, SSHKeyListOpts{Fingerprint: fingerprint})
-	if len(sshKeys) == 0 {
-		return nil, response, err
-	}
-	return sshKeys[0], response, err
+	return firstBy(func() ([]*SSHKey, *Response, error) {
+		return c.List(ctx, SSHKeyListOpts{Fingerprint: fingerprint})
+	})
 }
 
 // Get retrieves a SSH key by its ID if the input can be parsed as an integer, otherwise it
 // retrieves a SSH key by its name. If the SSH key does not exist, nil is returned.
 func (c *SSHKeyClient) Get(ctx context.Context, idOrName string) (*SSHKey, *Response, error) {
-	if id, err := strconv.Atoi(idOrName); err == nil {
-		return c.GetByID(ctx, int(id))
-	}
-	return c.GetByName(ctx, idOrName)
+	return getByIDOrName(ctx, c.GetByID, c.GetByName, idOrName)
 }
 
 // SSHKeyListOpts specifies options for listing SSH keys.
@@ -97,15 +68,19 @@ type SSHKeyListOpts struct {
 	ListOpts
 	Name        string
 	Fingerprint string
+	Sort        []string
 }
 
 func (l SSHKeyListOpts) values() url.Values {
-	vals := l.ListOpts.values()
+	vals := l.ListOpts.Values()
 	if l.Name != "" {
 		vals.Add("name", l.Name)
 	}
 	if l.Fingerprint != "" {
 		vals.Add("fingerprint", l.Fingerprint)
+	}
+	for _, sort := range l.Sort {
+		vals.Add("sort", sort)
 	}
 	return vals
 }
@@ -115,22 +90,17 @@ func (l SSHKeyListOpts) values() url.Values {
 // Please note that filters specified in opts are not taken into account
 // when their value corresponds to their zero value or when they are empty.
 func (c *SSHKeyClient) List(ctx context.Context, opts SSHKeyListOpts) ([]*SSHKey, *Response, error) {
-	path := "/ssh_keys?" + opts.values().Encode()
-	req, err := c.client.NewRequest(ctx, "GET", path, nil)
+	const opPath = "/ssh_keys?%s"
+	ctx = ctxutil.SetOpPath(ctx, opPath)
+
+	reqPath := fmt.Sprintf(opPath, opts.values().Encode())
+
+	respBody, resp, err := getRequest[schema.SSHKeyListResponse](ctx, c.client, reqPath)
 	if err != nil {
-		return nil, nil, err
+		return nil, resp, err
 	}
 
-	var body schema.SSHKeyListResponse
-	resp, err := c.client.Do(req, &body)
-	if err != nil {
-		return nil, nil, err
-	}
-	sshKeys := make([]*SSHKey, 0, len(body.SSHKeys))
-	for _, s := range body.SSHKeys {
-		sshKeys = append(sshKeys, SSHKeyFromSchema(s))
-	}
-	return sshKeys, resp, nil
+	return allFromSchemaFunc(respBody.SSHKeys, SSHKeyFromSchema), resp, nil
 }
 
 // All returns all SSH keys.
@@ -140,22 +110,10 @@ func (c *SSHKeyClient) All(ctx context.Context) ([]*SSHKey, error) {
 
 // AllWithOpts returns all SSH keys with the given options.
 func (c *SSHKeyClient) AllWithOpts(ctx context.Context, opts SSHKeyListOpts) ([]*SSHKey, error) {
-	allSSHKeys := []*SSHKey{}
-
-	_, err := c.client.all(func(page int) (*Response, error) {
+	return iterPages(func(page int) ([]*SSHKey, *Response, error) {
 		opts.Page = page
-		sshKeys, resp, err := c.List(ctx, opts)
-		if err != nil {
-			return resp, err
-		}
-		allSSHKeys = append(allSSHKeys, sshKeys...)
-		return resp, nil
+		return c.List(ctx, opts)
 	})
-	if err != nil {
-		return nil, err
-	}
-
-	return allSSHKeys, nil
 }
 
 // SSHKeyCreateOpts specifies parameters for creating a SSH key.
@@ -168,16 +126,21 @@ type SSHKeyCreateOpts struct {
 // Validate checks if options are valid.
 func (o SSHKeyCreateOpts) Validate() error {
 	if o.Name == "" {
-		return errors.New("missing name")
+		return missingField(o, "Name")
 	}
 	if o.PublicKey == "" {
-		return errors.New("missing public key")
+		return missingField(o, "PublicKey")
 	}
 	return nil
 }
 
 // Create creates a new SSH key with the given options.
 func (c *SSHKeyClient) Create(ctx context.Context, opts SSHKeyCreateOpts) (*SSHKey, *Response, error) {
+	const opPath = "/ssh_keys"
+	ctx = ctxutil.SetOpPath(ctx, opPath)
+
+	reqPath := opPath
+
 	if err := opts.Validate(); err != nil {
 		return nil, nil, err
 	}
@@ -188,31 +151,23 @@ func (c *SSHKeyClient) Create(ctx context.Context, opts SSHKeyCreateOpts) (*SSHK
 	if opts.Labels != nil {
 		reqBody.Labels = &opts.Labels
 	}
-	reqBodyData, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, nil, err
-	}
 
-	req, err := c.client.NewRequest(ctx, "POST", "/ssh_keys", bytes.NewReader(reqBodyData))
-	if err != nil {
-		return nil, nil, err
-	}
-
-	var respBody schema.SSHKeyCreateResponse
-	resp, err := c.client.Do(req, &respBody)
+	respBody, resp, err := postRequest[schema.SSHKeyCreateResponse](ctx, c.client, reqPath, reqBody)
 	if err != nil {
 		return nil, resp, err
 	}
+
 	return SSHKeyFromSchema(respBody.SSHKey), resp, nil
 }
 
 // Delete deletes a SSH key.
 func (c *SSHKeyClient) Delete(ctx context.Context, sshKey *SSHKey) (*Response, error) {
-	req, err := c.client.NewRequest(ctx, "DELETE", fmt.Sprintf("/ssh_keys/%d", sshKey.ID), nil)
-	if err != nil {
-		return nil, err
-	}
-	return c.client.Do(req, nil)
+	const opPath = "/ssh_keys/%d"
+	ctx = ctxutil.SetOpPath(ctx, opPath)
+
+	reqPath := fmt.Sprintf(opPath, sshKey.ID)
+
+	return deleteRequestNoResult(ctx, c.client, reqPath)
 }
 
 // SSHKeyUpdateOpts specifies options for updating a SSH key.
@@ -223,27 +178,22 @@ type SSHKeyUpdateOpts struct {
 
 // Update updates a SSH key.
 func (c *SSHKeyClient) Update(ctx context.Context, sshKey *SSHKey, opts SSHKeyUpdateOpts) (*SSHKey, *Response, error) {
+	const opPath = "/ssh_keys/%d"
+	ctx = ctxutil.SetOpPath(ctx, opPath)
+
+	reqPath := fmt.Sprintf(opPath, sshKey.ID)
+
 	reqBody := schema.SSHKeyUpdateRequest{
 		Name: opts.Name,
 	}
 	if opts.Labels != nil {
 		reqBody.Labels = &opts.Labels
 	}
-	reqBodyData, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, nil, err
-	}
 
-	path := fmt.Sprintf("/ssh_keys/%d", sshKey.ID)
-	req, err := c.client.NewRequest(ctx, "PUT", path, bytes.NewReader(reqBodyData))
-	if err != nil {
-		return nil, nil, err
-	}
-
-	respBody := schema.SSHKeyUpdateResponse{}
-	resp, err := c.client.Do(req, &respBody)
+	respBody, resp, err := putRequest[schema.SSHKeyUpdateResponse](ctx, c.client, reqPath, reqBody)
 	if err != nil {
 		return nil, resp, err
 	}
+
 	return SSHKeyFromSchema(respBody.SSHKey), resp, nil
 }

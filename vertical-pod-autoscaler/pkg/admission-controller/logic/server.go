@@ -17,20 +17,31 @@ limitations under the License.
 package logic
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 
-	"k8s.io/api/admission/v1"
+	admissionv1 "k8s.io/api/admission/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/klog/v2"
+
 	"k8s.io/autoscaler/vertical-pod-autoscaler/pkg/admission-controller/resource"
 	"k8s.io/autoscaler/vertical-pod-autoscaler/pkg/admission-controller/resource/pod"
 	"k8s.io/autoscaler/vertical-pod-autoscaler/pkg/admission-controller/resource/pod/patch"
 	"k8s.io/autoscaler/vertical-pod-autoscaler/pkg/admission-controller/resource/vpa"
+	vpa_types "k8s.io/autoscaler/vertical-pod-autoscaler/pkg/apis/autoscaling.k8s.io/v1"
 	"k8s.io/autoscaler/vertical-pod-autoscaler/pkg/utils/limitrange"
 	metrics_admission "k8s.io/autoscaler/vertical-pod-autoscaler/pkg/utils/metrics/admission"
-	"k8s.io/klog/v2"
+)
+
+const (
+	vpaGroup               = "autoscaling.k8s.io"
+	vpaResource            = "verticalpodautoscalers"
+	autoDeprecationWarning = `UpdateMode "Auto" is deprecated and will be removed in a future API version. ` +
+		`Use explicit update modes like "Recreate", "Initial", or "InPlaceOrRecreate" instead. ` +
+		`See https://github.com/kubernetes/autoscaler/issues/8424 for more details.`
 )
 
 // AdmissionServer is an admission webhook server that modifies pod resources request based on VPA recommendation
@@ -56,12 +67,44 @@ func (s *AdmissionServer) RegisterResourceHandler(resourceHandler resource.Handl
 	s.resourceHandlers[resourceHandler.GroupResource()] = resourceHandler
 }
 
-func (s *AdmissionServer) admit(data []byte) (*v1.AdmissionResponse, metrics_admission.AdmissionStatus, metrics_admission.AdmissionResource) {
+// addDeprecationWarnings adds deprecation warnings to the admission response for VPA objects using deprecated modes
+func (s *AdmissionServer) addDeprecationWarnings(req *admissionv1.AdmissionRequest, resp *admissionv1.AdmissionResponse) {
+	if req.Object.Raw == nil {
+		return
+	}
+
+	// Check if this is a VPA object
+	admittedGroupResource := metav1.GroupResource{
+		Group:    req.Resource.Group,
+		Resource: req.Resource.Resource,
+	}
+
+	if admittedGroupResource.Group != vpaGroup || admittedGroupResource.Resource != vpaResource {
+		return
+	}
+
+	var vpa vpa_types.VerticalPodAutoscaler
+	if err := json.Unmarshal(req.Object.Raw, &vpa); err != nil {
+		klog.V(4).InfoS("Failed to unmarshal VPA object for deprecation warning check", "err", err)
+		return
+	}
+
+	if vpa.Spec.UpdatePolicy != nil && vpa.Spec.UpdatePolicy.UpdateMode != nil &&
+		*vpa.Spec.UpdatePolicy.UpdateMode == vpa_types.UpdateModeAuto {
+
+		if resp.Warnings == nil {
+			resp.Warnings = []string{}
+		}
+		resp.Warnings = append(resp.Warnings, autoDeprecationWarning)
+	}
+}
+
+func (s *AdmissionServer) admit(ctx context.Context, data []byte) (*admissionv1.AdmissionResponse, metrics_admission.AdmissionStatus, metrics_admission.AdmissionResource) {
 	// we don't block the admission by default, even on unparsable JSON
-	response := v1.AdmissionResponse{}
+	response := admissionv1.AdmissionResponse{}
 	response.Allowed = true
 
-	ar := v1.AdmissionReview{}
+	ar := admissionv1.AdmissionReview{}
 	if err := json.Unmarshal(data, &ar); err != nil {
 		klog.Error(err)
 		return &response, metrics_admission.Error, metrics_admission.Unknown
@@ -80,7 +123,7 @@ func (s *AdmissionServer) admit(data []byte) (*v1.AdmissionResponse, metrics_adm
 
 	handler, ok := s.resourceHandlers[admittedGroupResource]
 	if ok {
-		patches, err = handler.GetPatches(ar.Request)
+		patches, err = handler.GetPatches(ctx, ar.Request)
 		resource = handler.AdmissionResource()
 
 		if handler.DisallowIncorrectObjects() && err != nil {
@@ -106,10 +149,10 @@ func (s *AdmissionServer) admit(data []byte) (*v1.AdmissionResponse, metrics_adm
 			klog.Errorf("Cannot marshal the patch %v: %v", patches, err)
 			return &response, metrics_admission.Error, resource
 		}
-		patchType := v1.PatchTypeJSONPatch
+		patchType := admissionv1.PatchTypeJSONPatch
 		response.PatchType = &patchType
 		response.Patch = patch
-		klog.V(4).Infof("Sending patches: %v", patches)
+		klog.V(4).InfoS("Sending patches", "patches", patches)
 	}
 
 	var status metrics_admission.AdmissionStatus
@@ -122,49 +165,60 @@ func (s *AdmissionServer) admit(data []byte) (*v1.AdmissionResponse, metrics_adm
 		metrics_admission.OnAdmittedPod(status == metrics_admission.Applied)
 	}
 
+	// Add deprecation warnings for VPA objects using deprecated modes
+	s.addDeprecationWarnings(ar.Request, &response)
+
 	return &response, status, resource
 }
 
 // Serve is a handler function of AdmissionServer
 func (s *AdmissionServer) Serve(w http.ResponseWriter, r *http.Request) {
-	timer := metrics_admission.NewAdmissionLatency()
+	ctx := r.Context()
+
+	executionTimer := metrics_admission.NewExecutionTimer()
+	defer executionTimer.ObserveTotal()
+	admissionLatency := metrics_admission.NewAdmissionLatency()
 
 	var body []byte
 	if r.Body != nil {
-		if data, err := ioutil.ReadAll(r.Body); err == nil {
+		if data, err := io.ReadAll(r.Body); err == nil {
 			body = data
 		}
 	}
-
 	// verify the content type is accurate
 	contentType := r.Header.Get("Content-Type")
 	if contentType != "application/json" {
 		klog.Errorf("contentType=%s, expect application/json", contentType)
-		timer.Observe(metrics_admission.Error, metrics_admission.Unknown)
+		admissionLatency.Observe(metrics_admission.Error, metrics_admission.Unknown)
 		return
 	}
+	executionTimer.ObserveStep("read_request")
 
-	reviewResponse, status, resource := s.admit(body)
-	ar := v1.AdmissionReview{
+	reviewResponse, status, resource := s.admit(ctx, body)
+	ar := admissionv1.AdmissionReview{
 		Response: reviewResponse,
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "AdmissionReview",
 			APIVersion: "admission.k8s.io/v1",
 		},
 	}
+	executionTimer.ObserveStep("admit")
 
 	resp, err := json.Marshal(ar)
 	if err != nil {
 		klog.Error(err)
-		timer.Observe(metrics_admission.Error, resource)
+		admissionLatency.Observe(metrics_admission.Error, resource)
 		return
 	}
+	executionTimer.ObserveStep("build_response")
 
-	if _, err := w.Write(resp); err != nil {
+	_, err = w.Write(resp)
+	if err != nil {
 		klog.Error(err)
-		timer.Observe(metrics_admission.Error, resource)
+		admissionLatency.Observe(metrics_admission.Error, resource)
 		return
 	}
+	executionTimer.ObserveStep("write_response")
 
-	timer.Observe(status, resource)
+	admissionLatency.Observe(status, resource)
 }

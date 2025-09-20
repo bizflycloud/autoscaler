@@ -24,6 +24,7 @@ import (
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+
 	vpa_types "k8s.io/autoscaler/vertical-pod-autoscaler/pkg/apis/autoscaling.k8s.io/v1"
 	metrics_quality "k8s.io/autoscaler/vertical-pod-autoscaler/pkg/utils/metrics/quality"
 	vpa_api_util "k8s.io/autoscaler/vertical-pod-autoscaler/pkg/utils/vpa"
@@ -104,8 +105,8 @@ type Vpa struct {
 	Created time.Time
 	// CheckpointWritten indicates when last checkpoint for the VPA object was stored.
 	CheckpointWritten time.Time
-	// IsV1Beta1API is set to true if VPA object has labelSelector defined as in v1beta1 api.
-	IsV1Beta1API bool
+	// APIVersion of the VPA object.
+	APIVersion string
 	// TargetRef points to the controller managing the set of pods.
 	TargetRef *autoscaling.CrossVersionObjectReference
 	// PodCount contains number of live Pods matching a given VPA object.
@@ -123,10 +124,25 @@ func NewVpa(id VpaID, selector labels.Selector, created time.Time) *Vpa {
 		Created:                         created,
 		Annotations:                     make(vpaAnnotationsMap),
 		Conditions:                      make(vpaConditionsMap),
-		IsV1Beta1API:                    false,
-		PodCount:                        0,
+		// APIVersion defaults to the version of the client used to read resources.
+		// If a new version is introduced that needs to be differentiated beyond the
+		// client conversion, this needs to be done based on the resource content.
+		// The K8s client will not return the resource apiVersion as it's converted
+		// to the version requested by the client server side.
+		APIVersion: vpa_types.SchemeGroupVersion.Version,
+		PodCount:   0,
 	}
 	return vpa
+}
+
+// SetAPIVersion to the version of the VPA API object.
+// Default API Version is the API version of the VPA client.
+// If the provided version is empty, no change is made.
+func (vpa *Vpa) SetAPIVersion(to string) {
+	if to == "" {
+		return
+	}
+	vpa.APIVersion = to
 }
 
 // UseAggregationIfMatching checks if the given aggregation matches (contributes to) this VPA
@@ -150,8 +166,8 @@ func (vpa *Vpa) UpdateRecommendation(recommendation *vpa_types.RecommendedPodRes
 	for _, containerRecommendation := range recommendation.ContainerRecommendations {
 		for container, state := range vpa.aggregateContainerStates {
 			if container.ContainerName() == containerRecommendation.ContainerName {
-				metrics_quality.ObserveRecommendationChange(state.LastRecommendation, containerRecommendation.UncappedTarget, vpa.UpdateMode, vpa.PodCount)
-				state.LastRecommendation = containerRecommendation.UncappedTarget
+				metrics_quality.ObserveRecommendationChange(state.GetLastRecommendation(), containerRecommendation.UncappedTarget, vpa.UpdateMode, vpa.PodCount)
+				state.SetLastRecommendation(containerRecommendation.UncappedTarget)
 			}
 		}
 	}
@@ -267,7 +283,7 @@ func (vpa *Vpa) AsStatus() *vpa_types.VerticalPodAutoscalerStatus {
 	return status
 }
 
-// HasMatchedPods returns true if there are are currently active pods in the
+// HasMatchedPods returns true if there are currently active pods in the
 // cluster matching this VPA, based on conditions. UpdateConditions should be
 // called first.
 func (vpa *Vpa) HasMatchedPods() bool {

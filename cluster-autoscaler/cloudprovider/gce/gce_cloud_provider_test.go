@@ -58,9 +58,9 @@ func (m *gceManagerMock) GetMigForInstance(instance GceRef) (Mig, error) {
 	return args.Get(0).(*gceMig), args.Error(1)
 }
 
-func (m *gceManagerMock) GetMigNodes(mig Mig) ([]cloudprovider.Instance, error) {
+func (m *gceManagerMock) GetMigNodes(mig Mig) ([]GceInstance, error) {
 	args := m.Called(mig)
-	return args.Get(0).([]cloudprovider.Instance), args.Error(1)
+	return args.Get(0).([]GceInstance), args.Error(1)
 }
 
 func (m *gceManagerMock) Refresh() error {
@@ -115,7 +115,7 @@ func TestBuildGceCloudProvider(t *testing.T) {
 		map[string]int64{cloudprovider.ResourceNameCores: 1, cloudprovider.ResourceNameMemory: 10000000},
 		map[string]int64{cloudprovider.ResourceNameCores: 10, cloudprovider.ResourceNameMemory: 100000000})
 
-	provider, err := BuildGceCloudProvider(gceManagerMock, resourceLimiter)
+	provider, err := BuildGceCloudProvider(gceManagerMock, resourceLimiter, nil)
 	assert.NoError(t, err)
 	assert.NotNil(t, provider)
 }
@@ -297,18 +297,24 @@ func TestMig(t *testing.T) {
 	// Test DecreaseTargetSize.
 	gceManagerMock.On("GetMigSize", mock.AnythingOfType("*gce.gceMig")).Return(int64(3), nil).Once()
 	gceManagerMock.On("GetMigNodes", mock.AnythingOfType("*gce.gceMig")).Return(
-		[]cloudprovider.Instance{
+		[]GceInstance{
 			{
-				Id: "gce://project1/us-central1-b/gke-cluster-1-default-pool-f7607aac-9j4g",
-				Status: &cloudprovider.InstanceStatus{
-					State: cloudprovider.InstanceRunning,
+				Instance: cloudprovider.Instance{
+					Id: "gce://project1/us-central1-b/gke-cluster-1-default-pool-f7607aac-9j4g",
+					Status: &cloudprovider.InstanceStatus{
+						State: cloudprovider.InstanceRunning,
+					},
 				},
+				NumericId: 1,
 			},
 			{
-				Id: "gce://project1/us-central1-b/gke-cluster-1-default-pool-f7607aac-dck1",
-				Status: &cloudprovider.InstanceStatus{
-					State: cloudprovider.InstanceRunning,
+				Instance: cloudprovider.Instance{
+					Id: "gce://project1/us-central1-b/gke-cluster-1-default-pool-f7607aac-dck1",
+					Status: &cloudprovider.InstanceStatus{
+						State: cloudprovider.InstanceRunning,
+					},
 				},
+				NumericId: 222,
 			},
 		}, nil).Once()
 	gceManagerMock.On("SetMigSize", mock.AnythingOfType("*gce.gceMig"), int64(2)).Return(nil).Once()
@@ -324,18 +330,24 @@ func TestMig(t *testing.T) {
 	// Test DecreaseTargetSize - fail on deleting existing nodes.
 	gceManagerMock.On("GetMigSize", mock.AnythingOfType("*gce.gceMig")).Return(int64(3), nil).Once()
 	gceManagerMock.On("GetMigNodes", mock.AnythingOfType("*gce.gceMig")).Return(
-		[]cloudprovider.Instance{
+		[]GceInstance{
 			{
-				Id: "gce://project1/us-central1-b/gke-cluster-1-default-pool-f7607aac-9j4g",
-				Status: &cloudprovider.InstanceStatus{
-					State: cloudprovider.InstanceRunning,
+				Instance: cloudprovider.Instance{
+					Id: "gce://project1/us-central1-b/gke-cluster-1-default-pool-f7607aac-9j4g",
+					Status: &cloudprovider.InstanceStatus{
+						State: cloudprovider.InstanceRunning,
+					},
 				},
+				NumericId: 1111,
 			},
 			{
-				Id: "gce://project1/us-central1-b/gke-cluster-1-default-pool-f7607aac-dck1",
-				Status: &cloudprovider.InstanceStatus{
-					State: cloudprovider.InstanceRunning,
+				Instance: cloudprovider.Instance{
+					Id: "gce://project1/us-central1-b/gke-cluster-1-default-pool-f7607aac-dck1",
+					Status: &cloudprovider.InstanceStatus{
+						State: cloudprovider.InstanceRunning,
+					},
 				},
+				NumericId: 333,
 			},
 		}, nil).Once()
 	err = mig1.DecreaseTargetSize(-2)
@@ -393,20 +405,34 @@ func TestMig(t *testing.T) {
 	assert.Equal(t, "min size reached, nodes will not be deleted", err.Error())
 	mock.AssertExpectationsForObjects(t, gceManagerMock)
 
+	// Test ForceDeleteNodes - ignore the min size constraint.
+	gceManagerMock.On("GetMigForInstance", n1ref).Return(mig1, nil).Once()
+	gceManagerMock.On("GetMigForInstance", n2ref).Return(mig1, nil).Once()
+	gceManagerMock.On("DeleteInstances", []GceRef{n1ref, n2ref}).Return(nil).Once()
+	err = mig1.ForceDeleteNodes([]*apiv1.Node{n1, n2})
+	assert.NoError(t, err)
+	mock.AssertExpectationsForObjects(t, gceManagerMock)
+
 	// Test Nodes.
 	gceManagerMock.On("GetMigNodes", mock.AnythingOfType("*gce.gceMig")).Return(
-		[]cloudprovider.Instance{
+		[]GceInstance{
 			{
-				Id: "gce://project1/us-central1-b/gke-cluster-1-default-pool-f7607aac-9j4g",
-				Status: &cloudprovider.InstanceStatus{
-					State: cloudprovider.InstanceRunning,
+				Instance: cloudprovider.Instance{
+					Id: "gce://project1/us-central1-b/gke-cluster-1-default-pool-f7607aac-9j4g",
+					Status: &cloudprovider.InstanceStatus{
+						State: cloudprovider.InstanceRunning,
+					},
 				},
+				NumericId: 1,
 			},
 			{
-				Id: "gce://project1/us-central1-b/gke-cluster-1-default-pool-f7607aac-dck1",
-				Status: &cloudprovider.InstanceStatus{
-					State: cloudprovider.InstanceRunning,
+				Instance: cloudprovider.Instance{
+					Id: "gce://project1/us-central1-b/gke-cluster-1-default-pool-f7607aac-dck1",
+					Status: &cloudprovider.InstanceStatus{
+						State: cloudprovider.InstanceRunning,
+					},
 				},
+				NumericId: 2,
 			},
 		}, nil).Once()
 	nodes, err := mig1.Nodes()

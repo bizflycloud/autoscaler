@@ -1,5 +1,5 @@
 ---
-apiVersion: autoscaling.k8s.io/v1beta2
+apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
 metadata:
   name: redis-vpa
@@ -27,7 +27,7 @@ spec:
     spec:
       containers:
         - name: master
-          image: k8s.gcr.io/redis:e2e  # or just image: redis
+          image: registry.k8s.io/redis:e2e  # or just image: redis
           resources:
             requests:
               cpu: 100m

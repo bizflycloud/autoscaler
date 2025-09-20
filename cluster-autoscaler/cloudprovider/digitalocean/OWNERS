@@ -1,8 +1,10 @@
 approvers:
-- andrewsykim
-- MorrisLaw
+- gottwald
 reviewers:
+- gottwald
+emeritus_approvers:
 - andrewsykim
 - MorrisLaw
 
-
+labels:
+- area/provider/digitalocean

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+
 	"k8s.io/autoscaler/vertical-pod-autoscaler/pkg/utils/metrics"
 )
 
@@ -74,15 +75,19 @@ var (
 			Namespace: metricsNamespace,
 			Name:      "admission_latency_seconds",
 			Help:      "Time spent in VPA Admission Controller.",
-			Buckets:   []float64{0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0, 300.0},
+			Buckets:   []float64{0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0, 300.0},
 		}, []string{"status", "resource"},
 	)
+
+	functionLatency = metrics.CreateExecutionTimeMetric(metricsNamespace,
+		"Time spent in various parts of VPA admission controller")
 )
 
-// Register initializes all metrics for VPA Admission Contoller
+// Register initializes all metrics for VPA Admission Controller
 func Register() {
 	prometheus.MustRegister(admissionCount)
 	prometheus.MustRegister(admissionLatency)
+	prometheus.MustRegister(functionLatency)
 }
 
 // OnAdmittedPod increases the counter of pods handled by VPA Admission Controller
@@ -100,5 +105,10 @@ func NewAdmissionLatency() *AdmissionLatency {
 
 // Observe measures the execution time from when the AdmissionLatency was created
 func (t *AdmissionLatency) Observe(status AdmissionStatus, resource AdmissionResource) {
-	(*t.histo).WithLabelValues(string(status), string(resource)).Observe(time.Now().Sub(t.start).Seconds())
+	(*t.histo).WithLabelValues(string(status), string(resource)).Observe(time.Since(t.start).Seconds())
+}
+
+// NewExecutionTimer provides a timer for Admission Controller's Serve execution
+func NewExecutionTimer() *metrics.ExecutionTimer {
+	return metrics.NewExecutionTimer(functionLatency)
 }

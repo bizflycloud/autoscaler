@@ -25,7 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/kubernetes/pkg/scheduler/framework"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
 )
 
 func TestBasicSnapshotRequest(t *testing.T) {
@@ -33,16 +33,12 @@ func TestBasicSnapshotRequest(t *testing.T) {
 	wg.Add(1)
 	snapshotter := NewDebuggingSnapshotter(true)
 
-	pod := []*framework.PodInfo{
-		{
-			Pod: &v1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "Pod1",
-				},
-				Spec: v1.PodSpec{
-					NodeName: "testNode",
-				},
-			},
+	pod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "Pod1",
+		},
+		Spec: v1.PodSpec{
+			NodeName: "testNode",
 		},
 	}
 	node := &v1.Node{
@@ -50,18 +46,10 @@ func TestBasicSnapshotRequest(t *testing.T) {
 			Name: "testNode",
 		},
 	}
-
-	nodeInfo := &framework.NodeInfo{
-		Pods:             pod,
-		Requested:        &framework.Resource{},
-		NonZeroRequested: &framework.Resource{},
-		Allocatable:      &framework.Resource{},
-		Generation:       0,
-	}
+	nodeInfo := framework.NewTestNodeInfo(node, pod)
 
 	var nodeGroups []*framework.NodeInfo
 	nodeGroups = append(nodeGroups, nodeInfo)
-	nodeGroups[0].SetNode(node)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
@@ -74,7 +62,7 @@ func TestBasicSnapshotRequest(t *testing.T) {
 	for !snapshotter.IsDataCollectionAllowed() {
 		snapshotter.StartDataCollection()
 	}
-	snapshotter.SetNodeGroupInfo(nodeGroups)
+	snapshotter.SetClusterNodes(nodeGroups)
 	snapshotter.Flush()
 
 	wg.Wait()
@@ -152,7 +140,7 @@ func TestRejectParallelRequest(t *testing.T) {
 	snapshotter.ResponseHandler(w1, req1)
 	assert.Equal(t, http.StatusTooManyRequests, w1.Code)
 
-	snapshotter.SetNodeGroupInfo(nil)
+	snapshotter.SetClusterNodes(nil)
 	snapshotter.Flush()
 	wg.Wait()
 

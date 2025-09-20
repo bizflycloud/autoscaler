@@ -27,9 +27,11 @@ import (
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
+	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/magnum/gophercloud/openstack/containerinfra/v1/nodegroups"
 	"k8s.io/autoscaler/cluster-autoscaler/config"
 	"k8s.io/autoscaler/cluster-autoscaler/config/dynamic"
 	"k8s.io/autoscaler/cluster-autoscaler/utils/errors"
+	"k8s.io/autoscaler/cluster-autoscaler/utils/gpu"
 	klog "k8s.io/klog/v2"
 )
 
@@ -88,6 +90,12 @@ func (mcp *magnumCloudProvider) GetAvailableGPUTypes() map[string]struct{} {
 	return availableGPUTypes
 }
 
+// GetNodeGpuConfig returns the label, type and resource name for the GPU added to node. If node doesn't have
+// any GPUs, it returns nil.
+func (mcp *magnumCloudProvider) GetNodeGpuConfig(node *apiv1.Node) *cloudprovider.GpuConfig {
+	return gpu.GetNodeGPUFromCloudProvider(mcp, node)
+}
+
 // NodeGroups returns all node groups managed by this cloud provider.
 func (mcp *magnumCloudProvider) NodeGroups() []cloudprovider.NodeGroup {
 	mcp.nodeGroupsLock.Lock()
@@ -117,6 +125,10 @@ func (mcp *magnumCloudProvider) NodeGroupForNode(node *apiv1.Node) (cloudprovide
 	if _, found := node.ObjectMeta.Labels["node-role.kubernetes.io/master"]; found {
 		return nil, nil
 	}
+	// Ignore control-plane nodes
+	if _, found := node.ObjectMeta.Labels["node-role.kubernetes.io/control-plane"]; found {
+		return nil, nil
+	}
 
 	ngUUID, err := mcp.magnumManager.nodeGroupForNode(node)
 	if err != nil {
@@ -133,6 +145,11 @@ func (mcp *magnumCloudProvider) NodeGroupForNode(node *apiv1.Node) (cloudprovide
 	klog.V(4).Infof("Node %s is not part of an autoscaled node group", node.Spec.ProviderID)
 
 	return nil, nil
+}
+
+// HasInstance returns whether a given node has a corresponding instance in this cloud provider
+func (mcp *magnumCloudProvider) HasInstance(node *apiv1.Node) (bool, error) {
+	return true, cloudprovider.ErrNotImplemented
 }
 
 // Pricing is not implemented.
@@ -251,6 +268,7 @@ func (mcp *magnumCloudProvider) refreshNodeGroups() error {
 			maxSize:           *nodeGroup.MaxNodeCount,
 			targetSize:        nodeGroup.NodeCount,
 			deletedNodes:      make(map[string]time.Time),
+			nodeTemplate:      getMagnumNodeTemplate(nodeGroup, mcp.magnumManager),
 		}
 		mcp.AddNodeGroup(ng)
 		mcp.magnumManager.fetchNodeGroupStackIDs(ng.UUID)
@@ -385,4 +403,29 @@ func BuildMagnum(opts config.AutoscalingOptions, do cloudprovider.NodeGroupDisco
 	}
 
 	return provider
+}
+
+func getMagnumNodeTemplate(nodegroup *nodegroups.NodeGroup, client magnumManager) *MagnumNodeTemplate {
+	template := &MagnumNodeTemplate{}
+	flavor, err := client.getFlavorById(nodegroup.FlavorID)
+
+	if err != nil {
+		klog.V(5).ErrorS(err, "Failed to build MagnumNodeTemplate. We return a fake template with 4 cores, 4GB ram and 50GB disk.")
+		template.CPUCores = 4
+		template.RAMMegabytes = 4096
+		template.DiskGigabytes = 50
+	} else {
+		template.CPUCores = flavor.VCPUs
+		template.RAMMegabytes = flavor.RAM
+		template.DiskGigabytes = flavor.Disk
+	}
+
+	if len(nodegroup.Labels) == 0 {
+		template.Labels = make(map[string]string)
+	} else {
+		template.Labels = nodegroup.Labels
+	}
+	template.Labels["magnum.openstack.org/nodegroup"] = nodegroup.Name
+
+	return template
 }

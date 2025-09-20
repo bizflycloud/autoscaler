@@ -27,9 +27,10 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
 	"k8s.io/autoscaler/cluster-autoscaler/config"
 	"k8s.io/autoscaler/cluster-autoscaler/config/dynamic"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
 	"k8s.io/autoscaler/cluster-autoscaler/utils/errors"
+	"k8s.io/autoscaler/cluster-autoscaler/utils/gpu"
 	klog "k8s.io/klog/v2"
-	schedulerframework "k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
 const (
@@ -168,6 +169,12 @@ func (baiducloud *baiducloudCloudProvider) GetAvailableGPUTypes() map[string]str
 	return availableGPUTypes
 }
 
+// GetNodeGpuConfig returns the label, type and resource name for the GPU added to node. If node doesn't have
+// any GPUs, it returns nil.
+func (baiducloud *baiducloudCloudProvider) GetNodeGpuConfig(node *apiv1.Node) *cloudprovider.GpuConfig {
+	return gpu.GetNodeGPUFromCloudProvider(baiducloud, node)
+}
+
 // NodeGroupForNode returns the node group for the given node, nil if the node
 // should not be processed by cluster autoscaler, or non-nil error if such
 // occurred. Must be implemented.
@@ -178,6 +185,11 @@ func (baiducloud *baiducloudCloudProvider) NodeGroupForNode(node *apiv1.Node) (c
 	}
 	asg, err := baiducloud.baiducloudManager.GetAsgForInstance(splitted[1])
 	return asg, err
+}
+
+// HasInstance returns whether a given node has a corresponding instance in this cloud provider
+func (baiducloud *baiducloudCloudProvider) HasInstance(*apiv1.Node) (bool, error) {
+	return true, cloudprovider.ErrNotImplemented
 }
 
 // Pricing returns pricing model for this cloud provider or error if not available.
@@ -266,6 +278,11 @@ func (asg *Asg) IncreaseSize(delta int) error {
 	return asg.baiducloudManager.ScaleUpCluster(delta, asg.Name)
 }
 
+// AtomicIncreaseSize is not implemented.
+func (asg *Asg) AtomicIncreaseSize(delta int) error {
+	return cloudprovider.ErrNotImplemented
+}
+
 // DeleteNodes deletes nodes from this node group. Error is returned either on
 // failure or if the given node doesn't belong to this node group. This function
 // should wait until node group size is updated. Implementation required.
@@ -296,6 +313,11 @@ func (asg *Asg) DeleteNodes(nodes []*apiv1.Node) error {
 		nodeID = append(nodeID, splitted[1])
 	}
 	return asg.baiducloudManager.ScaleDownCluster(nodeID)
+}
+
+// ForceDeleteNodes deletes nodes from the group regardless of constraints.
+func (asg *Asg) ForceDeleteNodes(nodes []*apiv1.Node) error {
+	return cloudprovider.ErrNotImplemented
 }
 
 // Belongs returns true if the given node belongs to the NodeGroup.
@@ -348,13 +370,13 @@ func (asg *Asg) Nodes() ([]cloudprovider.Instance, error) {
 	return instances, nil
 }
 
-// TemplateNodeInfo returns a schedulerframework.NodeInfo structure of an empty
+// TemplateNodeInfo returns a framework.NodeInfo structure of an empty
 // (as if just started) node. This will be used in scale-up simulations to
 // predict what would a new node look like if a node group was expanded. The returned
 // NodeInfo is expected to have a fully populated Node object, with all of the labels,
 // capacity and allocatable information as well as all pods that are started on
 // the node by default, using manifest (most likely only kube-proxy). Implementation optional.
-func (asg *Asg) TemplateNodeInfo() (*schedulerframework.NodeInfo, error) {
+func (asg *Asg) TemplateNodeInfo() (*framework.NodeInfo, error) {
 	template, err := asg.baiducloudManager.getAsgTemplate(asg.Name)
 	if err != nil {
 		return nil, err
@@ -363,8 +385,7 @@ func (asg *Asg) TemplateNodeInfo() (*schedulerframework.NodeInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	nodeInfo := schedulerframework.NewNodeInfo(cloudprovider.BuildKubeProxy(asg.Name))
-	nodeInfo.SetNode(node)
+	nodeInfo := framework.NewNodeInfo(node, nil, &framework.PodInfo{Pod: cloudprovider.BuildKubeProxy(asg.Name)})
 	return nodeInfo, nil
 }
 

@@ -22,11 +22,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/satori/go.uuid"
 	"net/url"
 	"reflect"
 	"strconv"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 /* if you use go 1.10 or higher, you can hack this util by these to avoid "TimeZone.zip not found" on Windows */
@@ -37,8 +38,9 @@ var (
 
 // GetUUIDV4 returns uuidHex
 func GetUUIDV4() (uuidHex string) {
-	uuidV4 := uuid.NewV4()
-	uuidHex = hex.EncodeToString(uuidV4.Bytes())
+	uuidV4 := uuid.New()
+	binaryUUID, _ := uuidV4.MarshalBinary()
+	uuidHex = hex.EncodeToString(binaryUUID)
 	return
 }
 
@@ -125,4 +127,16 @@ func InitStructWithDefaultTag(bean interface{}) {
 			setter.SetBool(boolValue)
 		}
 	}
+}
+
+// FirstNotEmpty returns the first non-empty string from the input list.
+// If all strings are empty or no arguments are provided, it returns an empty string.
+func FirstNotEmpty(strs ...string) string {
+	for _, str := range strs {
+		if str != "" {
+			return str
+		}
+	}
+
+	return ""
 }

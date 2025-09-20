@@ -17,6 +17,7 @@ limitations under the License.
 package ionoscloud
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -26,19 +27,21 @@ import (
 	"github.com/google/uuid"
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
+	ionos "k8s.io/autoscaler/cluster-autoscaler/cloudprovider/ionoscloud/ionos-cloud-sdk-go"
 	"k8s.io/klog/v2"
 )
 
 const (
-	envKeyClusterId    = "IONOS_CLUSTER_ID"
-	envKeyToken        = "IONOS_TOKEN"
-	envKeyInsecure     = "IONOS_INSECURE"
-	envKeyEndpoint     = "IONOS_ENDPOINT"
-	envKeyPollTimeout  = "IONOS_POLL_TIMEOUT"
-	envKeyPollInterval = "IONOS_POLL_INTERVAL"
-	envKeyTokensPath   = "IONOS_TOKENS_PATH"
-	defaultTimeout     = 15 * time.Minute
-	defaultInterval    = 30 * time.Second
+	envKeyClusterID         = "IONOS_CLUSTER_ID"
+	envKeyToken             = ionos.IonosTokenEnvVar
+	envKeyEndpoint          = ionos.IonosApiUrlEnvVar
+	envKeyInsecure          = "IONOS_INSECURE"
+	envKeyPollTimeout       = "IONOS_POLL_TIMEOUT"
+	envKeyPollInterval      = "IONOS_POLL_INTERVAL"
+	envKeyTokensPath        = "IONOS_TOKENS_PATH"
+	envKeyAdditionalHeaders = "IONOS_ADDITIONAL_HEADERS"
+	defaultTimeout          = 15 * time.Minute
+	defaultInterval         = 30 * time.Second
 )
 
 // IonosCloudManager handles IonosCloud communication and data caching of node groups.
@@ -65,10 +68,9 @@ type IonosCloudManager interface {
 
 // Config holds information necessary to construct IonosCloud API clients.
 type Config struct {
-	// ClusterId is the ID of the cluster to autoscale.
-	ClusterId string
+	// ClusterID is the ID of the cluster to autoscale.
+	ClusterID string
 	// Token is an IonosCloud API access token.
-	// This token takes precedence over tokens contained in TokensPath.
 	Token string
 	// Endpoint overrides the default API URL.
 	Endpoint string
@@ -78,8 +80,10 @@ type Config struct {
 	PollTimeout time.Duration
 	// PollInterval is the interval in which a node pool is polled after an update.
 	PollInterval time.Duration
-	// TokensPath points to a directory that contains file mappings of node pools to tokens.
+	// TokensPath points to a directory that contains token files
 	TokensPath string
+	// AdditionalHeaders are additional HTTP headers to append to each IonosCloud API request.
+	AdditionalHeaders map[string]string
 }
 
 // LoadConfigFromEnv loads the IonosCloud client config from env.
@@ -92,8 +96,8 @@ func LoadConfigFromEnv() (*Config, error) {
 		PollTimeout:  defaultTimeout,
 	}
 
-	if config.ClusterId = os.Getenv(envKeyClusterId); config.ClusterId == "" {
-		return nil, fmt.Errorf("missing value for %s", envKeyClusterId)
+	if config.ClusterID = os.Getenv(envKeyClusterID); config.ClusterID == "" {
+		return nil, fmt.Errorf("missing value for %s", envKeyClusterID)
 	}
 
 	if config.Token == "" && config.TokensPath == "" {
@@ -120,6 +124,22 @@ func LoadConfigFromEnv() (*Config, error) {
 		}
 	}
 
+	if rawHeaders := os.Getenv(envKeyAdditionalHeaders); rawHeaders != "" {
+		config.AdditionalHeaders = make(map[string]string)
+		for _, item := range strings.Split(rawHeaders, ";") {
+			item = strings.TrimSpace(item)
+			if item == "" {
+				// ignore empty items and trailing semicolons
+				continue
+			}
+			k, v, ok := strings.Cut(item, ":")
+			if !ok {
+				return nil, fmt.Errorf("missing colon in additional headers: %q", rawHeaders)
+			}
+			config.AdditionalHeaders[k] = v
+		}
+	}
+
 	return config, nil
 }
 
@@ -129,18 +149,14 @@ type ionosCloudManagerImpl struct {
 }
 
 // CreateIonosCloudManager initializes a new IonosCloudManager.
-func CreateIonosCloudManager(nodeGroupsConfig []string) (IonosCloudManager, error) {
+func CreateIonosCloudManager(nodeGroupsConfig []string, userAgent string) (IonosCloudManager, error) {
 	klog.V(4).Info("Creating IonosCloud manager")
 	config, err := LoadConfigFromEnv()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load config: %w", err)
 	}
 
-	client, err := NewAutoscalingClient(config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize client: %w", err)
-	}
-	manager := newManager(client)
+	manager := newManager(NewAutoscalingClient(config, userAgent))
 
 	if err := manager.initExplicitNodeGroups(nodeGroupsConfig); err != nil {
 		return nil, fmt.Errorf("failed to load pre-configured node groups: %w", err)
@@ -160,7 +176,7 @@ func newManager(client *AutoscalingClient) *ionosCloudManagerImpl {
 // The node groups are parsed from a list of strings in the format of <min>:<max>:<id>.
 func (manager *ionosCloudManagerImpl) initExplicitNodeGroups(nodeGroupsConfig []string) error {
 	if len(nodeGroupsConfig) == 0 {
-		return fmt.Errorf("missing value for --nodes flag")
+		return errors.New("missing value for --nodes flag")
 	}
 
 	for _, config := range nodeGroupsConfig {
@@ -190,14 +206,15 @@ func (manager *ionosCloudManagerImpl) initExplicitNodeGroups(nodeGroupsConfig []
 		if err != nil {
 			return fmt.Errorf("failed to fetch configured node pool %s: %w", np.Id(), err)
 		}
-		instances, err := manager.fetchInstancesForNodeGroup(np.Id())
-		if err != nil {
-			return err
-		}
 		manager.cache.AddNodeGroup(np)
-		manager.cache.SetNodeGroupSize(np.Id(), len(instances))
 		manager.cache.SetNodeGroupTargetSize(np.Id(), int(*fetchedNodePool.Properties.NodeCount))
-		manager.cache.SetInstancesCacheForNodeGroup(np.Id(), instances)
+
+		if err := manager.refreshInstancesForNodeGroup(np.Id()); err != nil {
+			if !errors.Is(err, errMissingNodeID) {
+				return err
+			}
+			klog.V(4).Infof("node pool %s has nodes with missing node ID", np.Id())
+		}
 	}
 	return nil
 }
@@ -233,7 +250,7 @@ func (manager *ionosCloudManagerImpl) GetNodeGroupTargetSize(nodeGroup cloudprov
 // SetNodeGroupSize sets the node group size.
 func (manager *ionosCloudManagerImpl) SetNodeGroupSize(nodeGroup cloudprovider.NodeGroup, size int) error {
 	klog.V(1).Infof("Setting node group size of %s to %d", nodeGroup.Id(), size)
-	if err := manager.client.ResizeNodePool(nodeGroup.Id(), size); err != nil {
+	if err := manager.client.ResizeNodePool(nodeGroup.Id(), int32(size)); err != nil {
 		return fmt.Errorf("node group resize failed: %w", err)
 	}
 	manager.cache.InvalidateNodeGroupTargetSize(nodeGroup.Id())
@@ -248,54 +265,34 @@ func (manager *ionosCloudManagerImpl) SetNodeGroupSize(nodeGroup cloudprovider.N
 }
 
 // DeleteNode deletes a single node.
-func (manager *ionosCloudManagerImpl) DeleteNode(nodeGroup cloudprovider.NodeGroup, nodeId string) error {
-	klog.V(1).Infof("Deleting node %s from node group %s", nodeId, nodeGroup.Id())
+func (manager *ionosCloudManagerImpl) DeleteNode(nodeGroup cloudprovider.NodeGroup, nodeID string) error {
+	klog.V(1).Infof("Deleting node %s from node group %s", nodeID, nodeGroup.Id())
 	size, err := manager.GetNodeGroupSize(nodeGroup)
 	if err != nil {
 		return err
 	}
 	manager.cache.InvalidateNodeGroupTargetSize(nodeGroup.Id())
-	if err := manager.client.DeleteNode(nodeGroup.Id(), nodeId); err != nil {
-		return fmt.Errorf("delete node %s failed: %w", nodeId, err)
+	if err := manager.client.DeleteNode(nodeGroup.Id(), nodeID); err != nil {
+		return fmt.Errorf("delete node %s failed: %w", nodeID, err)
 	}
 	targetSize := size - 1
 	if err := manager.client.WaitForNodePoolResize(nodeGroup.Id(), targetSize); err != nil {
 		return err
 	}
 	manager.cache.SetNodeGroupSize(nodeGroup.Id(), targetSize)
-	manager.cache.RemoveInstanceFromCache(nodeId)
-	klog.V(1).Infof("Successfully deleted node %s from node group %s", nodeId, nodeGroup.Id())
+	manager.cache.RemoveInstanceFromCache(nodeID)
+	klog.V(1).Infof("Successfully deleted node %s from node group %s", nodeID, nodeGroup.Id())
 	return nil
 }
 
 // GetInstancesForNodeGroup returns the instances for the given node group.
 func (manager *ionosCloudManagerImpl) GetInstancesForNodeGroup(nodeGroup cloudprovider.NodeGroup) ([]cloudprovider.Instance, error) {
-	if manager.cache.NodeGroupNeedsRefresh(nodeGroup.Id()) {
-		if err := manager.refreshInstancesForNodeGroup(nodeGroup.Id()); err != nil {
-			return nil, err
-		}
-	}
-	return manager.cache.GetInstancesForNodeGroup(nodeGroup.Id()), nil
+	return manager.fetchInstancesForNodeGroup(nodeGroup.Id())
 }
 
 func (manager *ionosCloudManagerImpl) GetNodeGroupForNode(node *apiv1.Node) cloudprovider.NodeGroup {
-	nodeId := convertToNodeId(node.Spec.ProviderID)
-	return manager.cache.GetNodeGroupForNode(nodeId)
-}
-
-// Refreshes the cache holding the instances for the configured node groups.
-func (manager *ionosCloudManagerImpl) Refresh() error {
-	nodeGroupInstances := map[string][]cloudprovider.Instance{}
-	for _, id := range manager.cache.GetNodeGroupIds() {
-		instances, err := manager.fetchInstancesForNodeGroup(id)
-		if err != nil {
-			return err
-		}
-		nodeGroupInstances[id] = instances
-	}
-
-	manager.cache.SetInstancesCache(nodeGroupInstances)
-	return nil
+	nodeID := convertToNodeID(node.Spec.ProviderID)
+	return manager.cache.GetNodeGroupForNode(nodeID)
 }
 
 func (manager *ionosCloudManagerImpl) refreshInstancesForNodeGroup(id string) error {
@@ -315,9 +312,9 @@ func (manager *ionosCloudManagerImpl) fetchInstancesForNodeGroup(id string) ([]c
 		return nil, fmt.Errorf("failed to list nodes for node group %s: %w", id, err)
 	}
 
-	instances := make([]cloudprovider.Instance, len(kubernetesNodes))
-	for i, kubernetesNode := range kubernetesNodes {
-		instances[i] = convertToInstance(kubernetesNode)
+	instances, err := convertToInstances(kubernetesNodes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert instances for node group %s: %w", id, err)
 	}
 
 	return instances, nil

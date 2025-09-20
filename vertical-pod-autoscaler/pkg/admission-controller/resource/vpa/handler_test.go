@@ -23,7 +23,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
+
 	vpa_types "k8s.io/autoscaler/vertical-pod-autoscaler/pkg/apis/autoscaling.k8s.io/v1"
+	"k8s.io/autoscaler/vertical-pod-autoscaler/pkg/features"
 )
 
 const (
@@ -37,14 +40,17 @@ func TestValidateVPA(t *testing.T) {
 	badMinReplicas := int32(0)
 	validMinReplicas := int32(1)
 	badScalingMode := vpa_types.ContainerScalingMode("bad")
+	badCPUResource := resource.MustParse("187500u")
 	validScalingMode := vpa_types.ContainerScalingModeAuto
 	scalingModeOff := vpa_types.ContainerScalingModeOff
 	controlledValuesRequestsAndLimits := vpa_types.ContainerControlledValuesRequestsAndLimits
+	inPlaceOrRecreateUpdateMode := vpa_types.UpdateModeInPlaceOrRecreate
 	tests := []struct {
-		name        string
-		vpa         vpa_types.VerticalPodAutoscaler
-		isCreate    bool
-		expectError error
+		name                                 string
+		vpa                                  vpa_types.VerticalPodAutoscaler
+		isCreate                             bool
+		expectError                          error
+		inPlaceOrRecreateFeatureGateDisabled bool
 	}{
 		{
 			name: "empty update",
@@ -54,7 +60,7 @@ func TestValidateVPA(t *testing.T) {
 			name:        "empty create",
 			vpa:         vpa_types.VerticalPodAutoscaler{},
 			isCreate:    true,
-			expectError: fmt.Errorf("TargetRef is required. If you're using v1beta1 version of the API, please migrate to v1"),
+			expectError: fmt.Errorf("targetRef is required. If you're using v1beta1 version of the API, please migrate to v1"),
 		},
 		{
 			name: "no update mode",
@@ -63,7 +69,7 @@ func TestValidateVPA(t *testing.T) {
 					UpdatePolicy: &vpa_types.PodUpdatePolicy{},
 				},
 			},
-			expectError: fmt.Errorf("UpdateMode is required if UpdatePolicy is used"),
+			expectError: fmt.Errorf("updateMode is required if UpdatePolicy is used"),
 		},
 		{
 			name: "bad update mode",
@@ -77,6 +83,42 @@ func TestValidateVPA(t *testing.T) {
 			expectError: fmt.Errorf("unexpected UpdateMode value bad"),
 		},
 		{
+			name: "creating VPA with InPlaceOrRecreate update mode not allowed by disabled feature gate",
+			vpa: vpa_types.VerticalPodAutoscaler{
+				Spec: vpa_types.VerticalPodAutoscalerSpec{
+					UpdatePolicy: &vpa_types.PodUpdatePolicy{
+						UpdateMode: &inPlaceOrRecreateUpdateMode,
+					},
+				},
+			},
+			isCreate:                             true,
+			inPlaceOrRecreateFeatureGateDisabled: true,
+			expectError:                          fmt.Errorf("in order to use UpdateMode %s, you must enable feature gate %s in the admission-controller args", vpa_types.UpdateModeInPlaceOrRecreate, features.InPlaceOrRecreate),
+		},
+		{
+			name: "updating VPA with InPlaceOrRecreate update mode allowed by disabled feature gate",
+			vpa: vpa_types.VerticalPodAutoscaler{
+				Spec: vpa_types.VerticalPodAutoscalerSpec{
+					UpdatePolicy: &vpa_types.PodUpdatePolicy{
+						UpdateMode: &inPlaceOrRecreateUpdateMode,
+					},
+				},
+			},
+			isCreate:                             false,
+			inPlaceOrRecreateFeatureGateDisabled: true,
+			expectError:                          nil,
+		},
+		{
+			name: "InPlaceOrRecreate update mode enabled by feature gate",
+			vpa: vpa_types.VerticalPodAutoscaler{
+				Spec: vpa_types.VerticalPodAutoscalerSpec{
+					UpdatePolicy: &vpa_types.PodUpdatePolicy{
+						UpdateMode: &inPlaceOrRecreateUpdateMode,
+					},
+				},
+			},
+		},
+		{
 			name: "zero minReplicas",
 			vpa: vpa_types.VerticalPodAutoscaler{
 				Spec: vpa_types.VerticalPodAutoscalerSpec{
@@ -86,7 +128,7 @@ func TestValidateVPA(t *testing.T) {
 					},
 				},
 			},
-			expectError: fmt.Errorf("MinReplicas has to be positive, got 0"),
+			expectError: fmt.Errorf("minReplicas has to be positive, got 0"),
 		},
 		{
 			name: "no policy name",
@@ -97,7 +139,7 @@ func TestValidateVPA(t *testing.T) {
 					},
 				},
 			},
-			expectError: fmt.Errorf("ContainerPolicies.ContainerName is required"),
+			expectError: fmt.Errorf("containerPolicies.ContainerName is required"),
 		},
 		{
 			name: "invalid scaling mode",
@@ -128,7 +170,7 @@ func TestValidateVPA(t *testing.T) {
 					},
 				},
 			},
-			expectError: fmt.Errorf("The current version of VPA object shouldn't specify more than one recommenders."),
+			expectError: fmt.Errorf("the current version of VPA object shouldn't specify more than one recommenders"),
 		},
 		{
 			name: "bad limits",
@@ -152,6 +194,90 @@ func TestValidateVPA(t *testing.T) {
 			expectError: fmt.Errorf("max resource for cpu is lower than min"),
 		},
 		{
+			name: "bad minAllowed cpu value",
+			vpa: vpa_types.VerticalPodAutoscaler{
+				Spec: vpa_types.VerticalPodAutoscalerSpec{
+					ResourcePolicy: &vpa_types.PodResourcePolicy{
+						ContainerPolicies: []vpa_types.ContainerResourcePolicy{
+							{
+								ContainerName: "loot box",
+								MinAllowed: apiv1.ResourceList{
+									cpu: resource.MustParse("187500u"),
+								},
+								MaxAllowed: apiv1.ResourceList{
+									cpu: resource.MustParse("275m"),
+								},
+							},
+						},
+					},
+				},
+			},
+			expectError: fmt.Errorf("minAllowed: CPU [%v] must be a whole number of milli CPUs", badCPUResource.String()),
+		},
+		{
+			name: "bad minAllowed memory value",
+			vpa: vpa_types.VerticalPodAutoscaler{
+				Spec: vpa_types.VerticalPodAutoscalerSpec{
+					ResourcePolicy: &vpa_types.PodResourcePolicy{
+						ContainerPolicies: []vpa_types.ContainerResourcePolicy{
+							{
+								ContainerName: "loot box",
+								MinAllowed: apiv1.ResourceList{
+									cpu:    resource.MustParse("1m"),
+									memory: resource.MustParse("100m"),
+								},
+								MaxAllowed: apiv1.ResourceList{
+									cpu:    resource.MustParse("275m"),
+									memory: resource.MustParse("500M"),
+								},
+							},
+						},
+					},
+				},
+			},
+			expectError: fmt.Errorf("minAllowed: memory [%v] must be a whole number of bytes", resource.MustParse("100m")),
+		},
+		{
+			name: "bad maxAllowed cpu value",
+			vpa: vpa_types.VerticalPodAutoscaler{
+				Spec: vpa_types.VerticalPodAutoscalerSpec{
+					ResourcePolicy: &vpa_types.PodResourcePolicy{
+						ContainerPolicies: []vpa_types.ContainerResourcePolicy{
+							{
+								ContainerName: "loot box",
+								MinAllowed:    apiv1.ResourceList{},
+								MaxAllowed: apiv1.ResourceList{
+									cpu: resource.MustParse("187500u"),
+								},
+							},
+						},
+					},
+				},
+			},
+			expectError: fmt.Errorf("maxAllowed: CPU [%s] must be a whole number of milli CPUs", badCPUResource.String()),
+		},
+		{
+			name: "bad maxAllowed memory value",
+			vpa: vpa_types.VerticalPodAutoscaler{
+				Spec: vpa_types.VerticalPodAutoscalerSpec{
+					ResourcePolicy: &vpa_types.PodResourcePolicy{
+						ContainerPolicies: []vpa_types.ContainerResourcePolicy{
+							{
+								ContainerName: "loot box",
+								MinAllowed: apiv1.ResourceList{
+									cpu: resource.MustParse("1m")},
+								MaxAllowed: apiv1.ResourceList{
+									cpu:    resource.MustParse("275m"),
+									memory: resource.MustParse("500m"),
+								},
+							},
+						},
+					},
+				},
+			},
+			expectError: fmt.Errorf("maxAllowed: memory [%v] must be a whole number of bytes", resource.MustParse("500m")),
+		},
+		{
 			name: "scaling off with controlled values requests and limits",
 			vpa: vpa_types.VerticalPodAutoscaler{
 				Spec: vpa_types.VerticalPodAutoscalerSpec{
@@ -166,7 +292,7 @@ func TestValidateVPA(t *testing.T) {
 					},
 				},
 			},
-			expectError: fmt.Errorf("ControlledValues shouldn't be specified if container scaling mode is off."),
+			expectError: fmt.Errorf("controlledValues shouldn't be specified if container scaling mode is off"),
 		},
 		{
 			name: "all valid",
@@ -196,7 +322,8 @@ func TestValidateVPA(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(fmt.Sprintf("test case: %s", tc.name), func(t *testing.T) {
-			err := validateVPA(&tc.vpa, tc.isCreate)
+			featuregatetesting.SetFeatureGateDuringTest(t, features.MutableFeatureGate, features.InPlaceOrRecreate, !tc.inPlaceOrRecreateFeatureGateDisabled)
+			err := ValidateVPA(&tc.vpa, tc.isCreate)
 			if tc.expectError == nil {
 				assert.NoError(t, err)
 			} else {

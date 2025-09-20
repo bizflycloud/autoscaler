@@ -12,10 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM gcr.io/distroless/static:latest
-MAINTAINER Tomasz Kulczynski "tkulczynski@google.com"
-ARG ARCH
-copy admission-controller-$ARCH /admission-controller
+FROM --platform=$BUILDPLATFORM golang:1.24.6 AS builder
+
+WORKDIR /workspace
+
+# Copy the Go Modules manifests
+COPY go.mod go.mod
+COPY go.sum go.sum
+
+RUN go mod download
+
+COPY common common
+COPY pkg pkg
+
+ARG TARGETOS TARGETARCH
+ARG BUILD_LD_FLAGS="-s"
+
+RUN CGO_ENABLED=0 GOARCH=$TARGETARCH GOOS=$TARGETOS go build -C pkg/admission-controller -ldflags="${BUILD_LD_FLAGS}" -o admission-controller-$TARGETARCH
+
+FROM gcr.io/distroless/static:nonroot
+
+ARG TARGETARCH
+
+COPY --from=builder /workspace/pkg/admission-controller/admission-controller-$TARGETARCH /admission-controller
 
 ENTRYPOINT ["/admission-controller"]
-CMD ["--v=4", "--stderrthreshold=info"]

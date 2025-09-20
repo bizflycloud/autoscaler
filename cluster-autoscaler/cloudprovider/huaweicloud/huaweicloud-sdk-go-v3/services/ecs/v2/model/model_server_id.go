@@ -1,25 +1,22 @@
-/*
- * ecs
- *
- * ECS Open API
- *
- */
-
 package model
 
 import (
-	"encoding/json"
+	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/huaweicloud/huaweicloud-sdk-go-v3/core/utils"
 
 	"strings"
 )
 
-//
 type ServerId struct {
 	// 云服务器ID。
+
 	Id string `json:"id"`
 }
 
 func (o ServerId) String() string {
-	data, _ := json.Marshal(o)
+	data, err := utils.Marshal(o)
+	if err != nil {
+		return "ServerId struct{}"
+	}
+
 	return strings.Join([]string{"ServerId", string(data)}, " ")
 }

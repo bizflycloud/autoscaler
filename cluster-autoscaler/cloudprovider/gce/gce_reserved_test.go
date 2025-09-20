@@ -29,6 +29,7 @@ func TestCalculateKernelReservedLinux(t *testing.T) {
 		physicalMemory int64
 		reservedMemory int64
 		osDistribution OperatingSystemDistribution
+		arch           SystemArchitecture
 	}
 	testCases := []testCase{
 		{
@@ -91,15 +92,32 @@ func TestCalculateKernelReservedLinux(t *testing.T) {
 			reservedMemory: 2*GiB + kernelReservedMemory + swiotlbReservedMemory,
 			osDistribution: OperatingSystemDistributionUbuntu,
 		},
+		{
+			physicalMemory: 3 * GiB,
+			reservedMemory: 48*MiB + kernelReservedMemory + lowMemoryOffset,
+			osDistribution: OperatingSystemDistributionCOS,
+			arch:           Arm64,
+		},
+		{
+			physicalMemory: 3.25 * GiB,
+			reservedMemory: 52*MiB + kernelReservedMemory + swiotlbReservedMemory + lowMemoryOffset,
+			osDistribution: OperatingSystemDistributionCOS,
+			arch:           Arm64,
+		},
 	}
 	for idx, tc := range testCases {
 		r := &GceReserved{}
 		t.Run(fmt.Sprintf("%v", idx), func(t *testing.T) {
-			reserved := r.CalculateKernelReserved(tc.physicalMemory, OperatingSystemLinux, tc.osDistribution, "")
+			m := NewMigOsInfo(OperatingSystemLinux, tc.osDistribution, tc.arch)
+			reserved := r.CalculateKernelReserved(m, tc.physicalMemory)
 			if tc.osDistribution == OperatingSystemDistributionUbuntu {
 				assert.Equal(t, tc.reservedMemory+int64(math.Min(correctionConstant*float64(tc.physicalMemory), maximumCorrectionValue)+ubuntuSpecificOffset), reserved)
 			} else if tc.osDistribution == OperatingSystemDistributionCOS {
-				assert.Equal(t, tc.reservedMemory+int64(math.Min(correctionConstant*float64(tc.physicalMemory), maximumCorrectionValue)), reserved)
+				val := tc.reservedMemory + int64(math.Min(correctionConstant*float64(tc.physicalMemory), maximumCorrectionValue))
+				if tc.arch == Arm64 {
+					val = int64(math.Round(float64(val) * architectureOffsetRatio))
+				}
+				assert.Equal(t, val, reserved)
 			}
 		})
 	}
@@ -120,22 +138,10 @@ func TestEphemeralStorageOnLocalSSDFilesystemOverheadInBytes(t *testing.T) {
 			expected:       7289472 * KiB,
 		},
 		{
-			scenario:       "measured disk count but OS with different container runtime (cos_containerd)",
-			diskCount:      1,
-			osDistribution: OperatingSystemDistributionCOSContainerd,
-			expected:       7289472 * KiB, // same as COS
-		},
-		{
 			scenario:       "measured disk count and OS (ubuntu)",
 			diskCount:      1,
 			osDistribution: OperatingSystemDistributionUbuntu,
 			expected:       7219840 * KiB,
-		},
-		{
-			scenario:       "measured disk count but OS with different container runtime (ubuntu_containerd)",
-			diskCount:      1,
-			osDistribution: OperatingSystemDistributionUbuntuContainerd,
-			expected:       7219840 * KiB, // same as Ubuntu
 		},
 		{
 			scenario:       "mapped disk count",

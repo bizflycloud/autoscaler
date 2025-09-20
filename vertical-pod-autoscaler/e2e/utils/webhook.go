@@ -24,7 +24,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/onsi/ginkgo"
+	ginkgo "github.com/onsi/ginkgo/v2"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
@@ -192,7 +192,7 @@ func newMutatingIsReadyWebhookFixture(f *framework.Framework, certContext *certC
 // the webhook configuration.
 func waitWebhookConfigurationReady(f *framework.Framework) error {
 	cmClient := f.ClientSet.CoreV1().ConfigMaps(f.Namespace.Name + "-markers")
-	return wait.PollImmediate(100*time.Millisecond, 30*time.Second, func() (bool, error) {
+	return wait.PollUntilContextTimeout(context.Background(), 100*time.Millisecond, 30*time.Second, true, func(ctx context.Context) (done bool, err error) {
 		marker := &v1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: string(uuid.NewUUID()),
@@ -201,7 +201,7 @@ func waitWebhookConfigurationReady(f *framework.Framework) error {
 				},
 			},
 		}
-		_, err := cmClient.Create(context.TODO(), marker, metav1.CreateOptions{})
+		_, err = cmClient.Create(ctx, marker, metav1.CreateOptions{})
 		if err != nil {
 			// The always-deny webhook does not provide a reason, so check for the error string we expect
 			if strings.Contains(err.Error(), "denied") {
@@ -210,7 +210,7 @@ func waitWebhookConfigurationReady(f *framework.Framework) error {
 			return false, err
 		}
 		// best effort cleanup of markers that are no longer needed
-		_ = cmClient.Delete(context.TODO(), marker.GetName(), metav1.DeleteOptions{})
+		_ = cmClient.Delete(ctx, marker.GetName(), metav1.DeleteOptions{})
 		framework.Logf("Waiting for webhook configuration to be ready...")
 		return false, nil
 	})
@@ -303,7 +303,7 @@ func DeployWebhookAndService(f *framework.Framework, image string, certContext *
 				fmt.Sprintf("--port=%d", containerPort),
 			}, params...),
 			ReadinessProbe: &v1.Probe{
-				Handler: v1.Handler{
+				ProbeHandler: v1.ProbeHandler{
 					HTTPGet: &v1.HTTPGetAction{
 						Scheme: v1.URISchemeHTTPS,
 						Port:   intstr.FromInt(int(containerPort)),
@@ -375,7 +375,7 @@ func DeployWebhookAndService(f *framework.Framework, image string, certContext *
 	framework.ExpectNoError(err, "creating service %s in namespace %s", WebhookServiceName, namespace)
 
 	ginkgo.By("Verifying the service has paired with the endpoint")
-	err = framework.WaitForServiceEndpointsNum(client, namespace, WebhookServiceName, 1, 1*time.Second, 30*time.Second)
+	err = framework.WaitForServiceEndpointsNum(context.TODO(), client, namespace, WebhookServiceName, 1, 1*time.Second, 30*time.Second)
 	framework.ExpectNoError(err, "waiting for service %s/%s have %d endpoint", namespace, WebhookServiceName, 1)
 }
 

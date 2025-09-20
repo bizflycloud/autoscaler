@@ -17,13 +17,14 @@ limitations under the License.
 package nodegroupset
 
 import (
-	schedulerframework "k8s.io/kubernetes/pkg/scheduler/framework"
+	"k8s.io/autoscaler/cluster-autoscaler/config"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
 )
 
 // CreateAwsNodeInfoComparator returns a comparator that checks if two nodes should be considered
 // part of the same NodeGroupSet. This is true if they match usual conditions checked by IsCloudProviderNodeInfoSimilar,
 // even if they have different AWS-specific labels.
-func CreateAwsNodeInfoComparator(extraIgnoredLabels []string) NodeInfoComparator {
+func CreateAwsNodeInfoComparator(extraIgnoredLabels []string, ratioOpts config.NodeGroupDifferenceRatios) NodeInfoComparator {
 	awsIgnoredLabels := map[string]bool{
 		"alpha.eksctl.io/instance-id":    true, // this is a label used by eksctl to identify instances.
 		"alpha.eksctl.io/nodegroup-name": true, // this is a label used by eksctl to identify "node group" names.
@@ -41,7 +42,7 @@ func CreateAwsNodeInfoComparator(extraIgnoredLabels []string) NodeInfoComparator
 		awsIgnoredLabels[k] = true
 	}
 
-	return func(n1, n2 *schedulerframework.NodeInfo) bool {
-		return IsCloudProviderNodeInfoSimilar(n1, n2, awsIgnoredLabels)
+	return func(n1, n2 *framework.NodeInfo) bool {
+		return IsCloudProviderNodeInfoSimilar(n1, n2, awsIgnoredLabels, ratioOpts)
 	}
 }

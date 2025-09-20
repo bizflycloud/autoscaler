@@ -22,22 +22,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2020-12-01/compute"
-	"github.com/Azure/azure-sdk-for-go/services/storage/mgmt/2021-02-01/storage"
-	"github.com/Azure/go-autorest/autorest/to"
-	"github.com/golang/mock/gomock"
+	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2022-08-01/compute"
 	"github.com/stretchr/testify/assert"
 
-	"sigs.k8s.io/cloud-provider-azure/pkg/azureclients/storageaccountclient/mockstorageaccountclient"
 	"sigs.k8s.io/cloud-provider-azure/pkg/retry"
-)
-
-const (
-	testAccountName = "account"
-	// TODO(nilo19): verify if DeleteBlob unit test needs to check error string, and which message is expected. We saw both:
-	// storageAccountClientErrMsg = "Server failed to authenticate the request. Make sure the value of Authorization " +
-	//	 "header is formed correctly including the signature"
-	// storageAccountClientErrMsg = "The specified account is disabled"
 )
 
 func GetTestAzureUtil(t *testing.T) *AzUtil {
@@ -108,7 +96,7 @@ func TestWindowsVMNameParts(t *testing.T) {
 			t.Fatalf("incorrect poolPrefix. expected=%s actual=%s", d.expectedPoolPrefix, poolPrefix)
 		}
 		if orch != d.expectedOrch {
-			t.Fatalf("incorrect aks string. expected=%s actual=%s", d.expectedOrch, orch)
+			t.Fatalf("incorrect orchestrator string. expected=%s actual=%s", d.expectedOrch, orch)
 		}
 		if poolIndex != d.expectedPoolIndex {
 			t.Fatalf("incorrect poolIndex. expected=%d actual=%d", d.expectedPoolIndex, poolIndex)
@@ -125,7 +113,7 @@ func TestWindowsVMNameParts(t *testing.T) {
 func TestGetVMNameIndexLinux(t *testing.T) {
 	expectedAgentIndex := 65
 
-	agentIndex, err := GetVMNameIndex(compute.Linux, "k8s-agentpool1-38988164-65")
+	agentIndex, err := GetVMNameIndex(compute.OperatingSystemTypesLinux, "k8s-agentpool1-38988164-65")
 	if agentIndex != expectedAgentIndex {
 		t.Fatalf("incorrect agentIndex. expected=%d actual=%d", expectedAgentIndex, agentIndex)
 	}
@@ -137,7 +125,7 @@ func TestGetVMNameIndexLinux(t *testing.T) {
 func TestGetVMNameIndexWindows(t *testing.T) {
 	expectedAgentIndex := 20
 
-	agentIndex, err := GetVMNameIndex(compute.Windows, "38988k8s90320")
+	agentIndex, err := GetVMNameIndex(compute.OperatingSystemTypesWindows, "38988k8s90320")
 	if agentIndex != expectedAgentIndex {
 		t.Fatalf("incorrect agentIndex. expected=%d actual=%d", expectedAgentIndex, agentIndex)
 	}
@@ -227,13 +215,15 @@ func TestConvertResourceGroupNameToLower(t *testing.T) {
 		},
 		{
 			desc:        "providerID not in Azure format should report error",
-			resourceID:  "azure://invalid-id",
+			resourceID:  azurePrefix + "invalid-id",
 			expectError: true,
 		},
 		{
-			desc:       "resource group name in VM providerID should be converted",
-			resourceID: "azure:///subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/myResourceGroupName/providers/Microsoft.Compute/virtualMachines/k8s-agent-AAAAAAAA-0",
-			expected:   "azure:///subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/myresourcegroupname/providers/Microsoft.Compute/virtualMachines/k8s-agent-AAAAAAAA-0",
+			desc: "resource group name in VM providerID should be converted",
+			resourceID: azurePrefix + "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/myResourceGroupName" +
+				"/providers/Microsoft.Compute/virtualMachines/k8s-agent-AAAAAAAA-0",
+			expected: azurePrefix + "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/myresourcegroupname" +
+				"/providers/Microsoft.Compute/virtualMachines/k8s-agent-AAAAAAAA-0",
 		},
 		{
 			desc:       "resource group name in VM resourceID should be converted",
@@ -241,9 +231,11 @@ func TestConvertResourceGroupNameToLower(t *testing.T) {
 			expected:   "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/myresourcegroupname/providers/Microsoft.Compute/virtualMachines/k8s-agent-AAAAAAAA-0",
 		},
 		{
-			desc:       "resource group name in VMSS providerID should be converted",
-			resourceID: "azure:///subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/myResourceGroupName/providers/Microsoft.Compute/virtualMachineScaleSets/myScaleSetName/virtualMachines/156",
-			expected:   "azure:///subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/myresourcegroupname/providers/Microsoft.Compute/virtualMachineScaleSets/myScaleSetName/virtualMachines/156",
+			desc: "resource group name in VMSS providerID should be converted",
+			resourceID: azurePrefix + "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/myResourceGroupName" +
+				"/providers/Microsoft.Compute/virtualMachineScaleSets/myScaleSetName/virtualMachines/156",
+			expected: azurePrefix + "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/myresourcegroupname" +
+				"/providers/Microsoft.Compute/virtualMachineScaleSets/myScaleSetName/virtualMachines/156",
 		},
 		{
 			desc:       "resource group name in VMSS resourceID should be converted",
@@ -301,26 +293,6 @@ func TestIsAzureRequestsThrottled(t *testing.T) {
 		real := isAzureRequestsThrottled(test.rerr)
 		assert.Equal(t, test.expected, real, test.desc)
 	}
-}
-
-func TestDeleteBlob(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	azUtil := GetTestAzureUtil(t)
-	mockSAClient := mockstorageaccountclient.NewMockInterface(ctrl)
-	mockSAClient.EXPECT().ListKeys(
-		gomock.Any(),
-		azUtil.manager.config.ResourceGroup,
-		testAccountName).Return(storage.AccountListKeysResult{
-		Keys: &[]storage.AccountKey{
-			{Value: to.StringPtr("dmFsdWUK")},
-		},
-	}, nil)
-	azUtil.manager.azClient.storageAccountsClient = mockSAClient
-
-	err := azUtil.DeleteBlob(testAccountName, "vhd", "blob")
-	assert.Error(t, err)
 }
 
 func TestNormalizeMasterResourcesForScaling(t *testing.T) {

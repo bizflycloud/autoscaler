@@ -1,4 +1,4 @@
-{{- if .Values.rbac.create -}}
+{{- if and .Values.rbac.create .Values.rbac.clusterScoped -}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -6,6 +6,17 @@ metadata:
 {{ include "cluster-autoscaler.labels" . | indent 4 }}
   name: {{ template "cluster-autoscaler.fullname" . }}
 rules:
+{{- if (eq .Values.cloudProvider "coreweave") }}
+  - apiGroups:
+    - "compute.coreweave.com"
+    resources:
+    - nodepools
+    verbs:
+    - get
+    - list
+    - patch
+    - update
+{{- end }}
   - apiGroups:
       - ""
     resources:
@@ -42,6 +53,8 @@ rules:
     verbs:
     - watch
     - list
+    - create
+    - delete
     - get
     - update
   - apiGroups:
@@ -109,6 +122,7 @@ rules:
     - csinodes
     - csidrivers
     - csistoragecapacities
+    - volumeattachments
     verbs:
     - watch
     - list
@@ -120,6 +134,7 @@ rules:
     verbs:
       - list
       - watch
+      - get
   - apiGroups:
     - coordination.k8s.io
     resources:
@@ -146,5 +161,30 @@ rules:
     verbs:
     - use
 {{- end -}}
-
+{{- if and ( and ( eq .Values.cloudProvider "clusterapi" ) ( .Values.rbac.clusterScoped ) ( or ( eq .Values.clusterAPIMode "incluster-incluster" ) ( eq .Values.clusterAPIMode "kubeconfig-incluster" ) ))}}
+  - apiGroups:
+    - cluster.x-k8s.io
+    resources:
+    - machinedeployments
+    - machinepools
+    - machines
+    - machinesets
+    verbs:
+    - get
+    - list
+    - update
+    - watch
+  - apiGroups:
+    - cluster.x-k8s.io
+    resources:
+    - machinedeployments/scale
+    - machinepools/scale
+    verbs:
+    - get
+    - patch
+    - update
+{{- end }}
+{{- if .Values.rbac.additionalRules }}
+{{ toYaml .Values.rbac.additionalRules | indent 2 }}
+{{- end }}
 {{- end -}}

@@ -18,279 +18,67 @@ package main
 
 import (
 	ctx "context"
-	"flag"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
-	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
-	"k8s.io/autoscaler/cluster-autoscaler/debuggingsnapshot"
-
 	"github.com/spf13/pflag"
 
+	"k8s.io/autoscaler/cluster-autoscaler/config/flags"
+	"k8s.io/autoscaler/cluster-autoscaler/core/scaleup/orchestrator"
+	"k8s.io/autoscaler/cluster-autoscaler/debuggingsnapshot"
+	"k8s.io/autoscaler/cluster-autoscaler/loop"
+	"k8s.io/autoscaler/cluster-autoscaler/provisioningrequest/besteffortatomic"
+	"k8s.io/autoscaler/cluster-autoscaler/provisioningrequest/checkcapacity"
+	"k8s.io/autoscaler/cluster-autoscaler/provisioningrequest/provreqclient"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/clustersnapshot"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/clustersnapshot/predicate"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/clustersnapshot/store"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/scheduling"
+	"k8s.io/kubernetes/pkg/features"
+
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apiserver/pkg/server/mux"
 	"k8s.io/apiserver/pkg/server/routes"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
-	cloudBuilder "k8s.io/autoscaler/cluster-autoscaler/cloudprovider/builder"
-	"k8s.io/autoscaler/cluster-autoscaler/config"
 	"k8s.io/autoscaler/cluster-autoscaler/core"
-	"k8s.io/autoscaler/cluster-autoscaler/estimator"
-	"k8s.io/autoscaler/cluster-autoscaler/expander"
+	"k8s.io/autoscaler/cluster-autoscaler/core/podlistprocessor"
 	"k8s.io/autoscaler/cluster-autoscaler/metrics"
+	"k8s.io/autoscaler/cluster-autoscaler/observers/loopstart"
 	ca_processors "k8s.io/autoscaler/cluster-autoscaler/processors"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/nodegroupset"
-	"k8s.io/autoscaler/cluster-autoscaler/simulator"
-	"k8s.io/autoscaler/cluster-autoscaler/utils/errors"
+	"k8s.io/autoscaler/cluster-autoscaler/processors/nodeinfosprovider"
+	"k8s.io/autoscaler/cluster-autoscaler/processors/podinjection"
+	podinjectionbackoff "k8s.io/autoscaler/cluster-autoscaler/processors/podinjection/backoff"
+	"k8s.io/autoscaler/cluster-autoscaler/processors/pods"
+	"k8s.io/autoscaler/cluster-autoscaler/processors/provreq"
+	"k8s.io/autoscaler/cluster-autoscaler/processors/scaledowncandidates"
+	"k8s.io/autoscaler/cluster-autoscaler/processors/scaledowncandidates/emptycandidates"
+	"k8s.io/autoscaler/cluster-autoscaler/processors/scaledowncandidates/previouscandidates"
+	"k8s.io/autoscaler/cluster-autoscaler/processors/status"
+	provreqorchestrator "k8s.io/autoscaler/cluster-autoscaler/provisioningrequest/orchestrator"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/drainability/rules"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/options"
 	kube_util "k8s.io/autoscaler/cluster-autoscaler/utils/kubernetes"
-	"k8s.io/autoscaler/cluster-autoscaler/utils/units"
 	"k8s.io/autoscaler/cluster-autoscaler/version"
-	kube_client "k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	kube_flag "k8s.io/component-base/cli/flag"
 	componentbaseconfig "k8s.io/component-base/config"
-	"k8s.io/component-base/config/options"
+	componentopts "k8s.io/component-base/config/options"
+	"k8s.io/component-base/logs"
+	logsapi "k8s.io/component-base/logs/api/v1"
+	_ "k8s.io/component-base/logs/json/register"
 	"k8s.io/component-base/metrics/legacyregistry"
-	klog "k8s.io/klog/v2"
+	"k8s.io/klog/v2"
 )
-
-// MultiStringFlag is a flag for passing multiple parameters using same flag
-type MultiStringFlag []string
-
-// String returns string representation of the node groups.
-func (flag *MultiStringFlag) String() string {
-	return "[" + strings.Join(*flag, " ") + "]"
-}
-
-// Set adds a new configuration.
-func (flag *MultiStringFlag) Set(value string) error {
-	*flag = append(*flag, value)
-	return nil
-}
-
-func multiStringFlag(name string, usage string) *MultiStringFlag {
-	value := new(MultiStringFlag)
-	flag.Var(value, name, usage)
-	return value
-}
-
-var (
-	clusterName            = flag.String("cluster-name", "", "Autoscaled cluster name, if available")
-	address                = flag.String("address", ":8085", "The address to expose prometheus metrics.")
-	kubernetes             = flag.String("kubernetes", "", "Kubernetes master location. Leave blank for default")
-	kubeConfigFile         = flag.String("kubeconfig", "", "Path to kubeconfig file with authorization and master location information.")
-	cloudConfig            = flag.String("cloud-config", "", "The path to the cloud provider configuration file.  Empty string for no configuration file.")
-	namespace              = flag.String("namespace", "kube-system", "Namespace in which cluster-autoscaler run.")
-	scaleDownEnabled       = flag.Bool("scale-down-enabled", true, "Should CA scale down the cluster")
-	scaleDownDelayAfterAdd = flag.Duration("scale-down-delay-after-add", 10*time.Minute,
-		"How long after scale up that scale down evaluation resumes")
-	scaleDownDelayAfterDelete = flag.Duration("scale-down-delay-after-delete", 0,
-		"How long after node deletion that scale down evaluation resumes, defaults to scanInterval")
-	scaleDownDelayAfterFailure = flag.Duration("scale-down-delay-after-failure", 3*time.Minute,
-		"How long after scale down failure that scale down evaluation resumes")
-	scaleDownUnneededTime = flag.Duration("scale-down-unneeded-time", 10*time.Minute,
-		"How long a node should be unneeded before it is eligible for scale down")
-	scaleDownUnreadyTime = flag.Duration("scale-down-unready-time", 20*time.Minute,
-		"How long an unready node should be unneeded before it is eligible for scale down")
-	scaleDownUtilizationThreshold = flag.Float64("scale-down-utilization-threshold", 0.5,
-		"Sum of cpu or memory of all pods running on the node divided by node's corresponding allocatable resource, below which a node can be considered for scale down")
-	scaleDownGpuUtilizationThreshold = flag.Float64("scale-down-gpu-utilization-threshold", 0.5,
-		"Sum of gpu requests of all pods running on the node divided by node's allocatable resource, below which a node can be considered for scale down."+
-			"Utilization calculation only cares about gpu resource for accelerator node. cpu and memory utilization will be ignored.")
-	scaleDownNonEmptyCandidatesCount = flag.Int("scale-down-non-empty-candidates-count", 30,
-		"Maximum number of non empty nodes considered in one iteration as candidates for scale down with drain."+
-			"Lower value means better CA responsiveness but possible slower scale down latency."+
-			"Higher value can affect CA performance with big clusters (hundreds of nodes)."+
-			"Set to non positive value to turn this heuristic off - CA will not limit the number of nodes it considers.")
-	scaleDownCandidatesPoolRatio = flag.Float64("scale-down-candidates-pool-ratio", 0.1,
-		"A ratio of nodes that are considered as additional non empty candidates for"+
-			"scale down when some candidates from previous iteration are no longer valid."+
-			"Lower value means better CA responsiveness but possible slower scale down latency."+
-			"Higher value can affect CA performance with big clusters (hundreds of nodes)."+
-			"Set to 1.0 to turn this heuristics off - CA will take all nodes as additional candidates.")
-	scaleDownCandidatesPoolMinCount = flag.Int("scale-down-candidates-pool-min-count", 50,
-		"Minimum number of nodes that are considered as additional non empty candidates"+
-			"for scale down when some candidates from previous iteration are no longer valid."+
-			"When calculating the pool size for additional candidates we take"+
-			"max(#nodes * scale-down-candidates-pool-ratio, scale-down-candidates-pool-min-count).")
-	nodeDeletionDelayTimeout = flag.Duration("node-deletion-delay-timeout", 2*time.Minute, "Maximum time CA waits for removing delay-deletion.cluster-autoscaler.kubernetes.io/ annotations before deleting the node.")
-	scanInterval             = flag.Duration("scan-interval", 10*time.Second, "How often cluster is reevaluated for scale up or down")
-	maxNodesTotal            = flag.Int("max-nodes-total", 0, "Maximum number of nodes in all node groups. Cluster autoscaler will not grow the cluster beyond this number.")
-	coresTotal               = flag.String("cores-total", minMaxFlagString(0, config.DefaultMaxClusterCores), "Minimum and maximum number of cores in cluster, in the format <min>:<max>. Cluster autoscaler will not scale the cluster beyond these numbers.")
-	memoryTotal              = flag.String("memory-total", minMaxFlagString(0, config.DefaultMaxClusterMemory), "Minimum and maximum number of gigabytes of memory in cluster, in the format <min>:<max>. Cluster autoscaler will not scale the cluster beyond these numbers.")
-	gpuTotal                 = multiStringFlag("gpu-total", "Minimum and maximum number of different GPUs in cluster, in the format <gpu_type>:<min>:<max>. Cluster autoscaler will not scale the cluster beyond these numbers. Can be passed multiple times. CURRENTLY THIS FLAG ONLY WORKS ON GKE.")
-	cloudProviderFlag        = flag.String("cloud-provider", cloudBuilder.DefaultCloudProvider,
-		"Cloud provider type. Available values: ["+strings.Join(cloudBuilder.AvailableCloudProviders, ",")+"]")
-	maxBulkSoftTaintCount      = flag.Int("max-bulk-soft-taint-count", 10, "Maximum number of nodes that can be tainted/untainted PreferNoSchedule at the same time. Set to 0 to turn off such tainting.")
-	maxBulkSoftTaintTime       = flag.Duration("max-bulk-soft-taint-time", 3*time.Second, "Maximum duration of tainting/untainting nodes as PreferNoSchedule at the same time.")
-	maxEmptyBulkDeleteFlag     = flag.Int("max-empty-bulk-delete", 10, "Maximum number of empty nodes that can be deleted at the same time.")
-	maxGracefulTerminationFlag = flag.Int("max-graceful-termination-sec", 10*60, "Maximum number of seconds CA waits for pod termination when trying to scale down a node.")
-	maxTotalUnreadyPercentage  = flag.Float64("max-total-unready-percentage", 45, "Maximum percentage of unready nodes in the cluster.  After this is exceeded, CA halts operations")
-	okTotalUnreadyCount        = flag.Int("ok-total-unready-count", 3, "Number of allowed unready nodes, irrespective of max-total-unready-percentage")
-	scaleUpFromZero            = flag.Bool("scale-up-from-zero", true, "Should CA scale up when there 0 ready nodes.")
-	maxNodeProvisionTime       = flag.Duration("max-node-provision-time", 15*time.Minute, "Maximum time CA waits for node to be provisioned")
-	nodeGroupsFlag             = multiStringFlag(
-		"nodes",
-		"sets min,max size and other configuration data for a node group in a format accepted by cloud provider. Can be used multiple times. Format: <min>:<max>:<other...>")
-	nodeGroupAutoDiscoveryFlag = multiStringFlag(
-		"node-group-auto-discovery",
-		"One or more definition(s) of node group auto-discovery. "+
-			"A definition is expressed `<name of discoverer>:[<key>[=<value>]]`. "+
-			"The `aws` and `gce` cloud providers are currently supported. AWS matches by ASG tags, e.g. `asg:tag=tagKey,anotherTagKey`. "+
-			"GCE matches by IG name prefix, and requires you to specify min and max nodes per IG, e.g. `mig:namePrefix=pfx,min=0,max=10` "+
-			"Can be used multiple times.")
-
-	estimatorFlag = flag.String("estimator", estimator.BinpackingEstimatorName,
-		"Type of resource estimator to be used in scale up. Available values: ["+strings.Join(estimator.AvailableEstimators, ",")+"]")
-
-	expanderFlag = flag.String("expander", expander.RandomExpanderName, "Type of node group expander to be used in scale up. Available values: ["+strings.Join(expander.AvailableExpanders, ",")+"]. Specifying multiple values separated by commas will call the expanders in succession until there is only one option remaining. Ties still existing after this process are broken randomly.")
-
-	ignoreDaemonSetsUtilization = flag.Bool("ignore-daemonsets-utilization", false,
-		"Should CA ignore DaemonSet pods when calculating resource utilization for scaling down")
-	ignoreMirrorPodsUtilization = flag.Bool("ignore-mirror-pods-utilization", false,
-		"Should CA ignore Mirror pods when calculating resource utilization for scaling down")
-
-	writeStatusConfigMapFlag         = flag.Bool("write-status-configmap", true, "Should CA write status information to a configmap")
-	statusConfigMapName              = flag.String("status-config-map-name", "cluster-autoscaler-status", "Status configmap name")
-	maxInactivityTimeFlag            = flag.Duration("max-inactivity", 10*time.Minute, "Maximum time from last recorded autoscaler activity before automatic restart")
-	maxFailingTimeFlag               = flag.Duration("max-failing-time", 15*time.Minute, "Maximum time from last recorded successful autoscaler run before automatic restart")
-	balanceSimilarNodeGroupsFlag     = flag.Bool("balance-similar-node-groups", false, "Detect similar node groups and balance the number of nodes between them")
-	nodeAutoprovisioningEnabled      = flag.Bool("node-autoprovisioning-enabled", false, "Should CA autoprovision node groups when needed")
-	maxAutoprovisionedNodeGroupCount = flag.Int("max-autoprovisioned-node-group-count", 15, "The maximum number of autoprovisioned groups in the cluster.")
-
-	unremovableNodeRecheckTimeout = flag.Duration("unremovable-node-recheck-timeout", 5*time.Minute, "The timeout before we check again a node that couldn't be removed before")
-	expendablePodsPriorityCutoff  = flag.Int("expendable-pods-priority-cutoff", -10, "Pods with priority below cutoff will be expendable. They can be killed without any consideration during scale down and they don't cause scale up. Pods with null priority (PodPriority disabled) are non expendable.")
-	regional                      = flag.Bool("regional", false, "Cluster is regional.")
-	newPodScaleUpDelay            = flag.Duration("new-pod-scale-up-delay", 0*time.Second, "Pods less than this old will not be considered for scale-up.")
-
-	ignoreTaintsFlag                   = multiStringFlag("ignore-taint", "Specifies a taint to ignore in node templates when considering to scale a node group")
-	balancingIgnoreLabelsFlag          = multiStringFlag("balancing-ignore-label", "Specifies a label to ignore in addition to the basic and cloud-provider set of labels when comparing if two node groups are similar")
-	awsUseStaticInstanceList           = flag.Bool("aws-use-static-instance-list", false, "Should CA fetch instance types in runtime or use a static list. AWS only")
-	concurrentGceRefreshes             = flag.Int("gce-concurrent-refreshes", 1, "Maximum number of concurrent refreshes per cloud object type.")
-	enableProfiling                    = flag.Bool("profiling", false, "Is debug/pprof endpoint enabled")
-	clusterAPICloudConfigAuthoritative = flag.Bool("clusterapi-cloud-config-authoritative", false, "Treat the cloud-config flag authoritatively (do not fallback to using kubeconfig flag). ClusterAPI only")
-	cordonNodeBeforeTerminate          = flag.Bool("cordon-node-before-terminating", false, "Should CA cordon nodes before terminating during downscale process")
-	daemonSetEvictionForEmptyNodes     = flag.Bool("daemonset-eviction-for-empty-nodes", false, "DaemonSet pods will be gracefully terminated from empty nodes")
-	daemonSetEvictionForOccupiedNodes  = flag.Bool("daemonset-eviction-for-occupied-nodes", true, "DaemonSet pods will be gracefully terminated from non-empty nodes")
-	userAgent                          = flag.String("user-agent", "cluster-autoscaler", "User agent used for HTTP calls.")
-
-	emitPerNodeGroupMetrics  = flag.Bool("emit-per-nodegroup-metrics", false, "If true, emit per node group metrics.")
-	debuggingSnapshotEnabled = flag.Bool("debugging-snapshot-enabled", false, "Whether the debugging snapshot of cluster autoscaler feature is enabled")
-)
-
-func createAutoscalingOptions() config.AutoscalingOptions {
-	minCoresTotal, maxCoresTotal, err := parseMinMaxFlag(*coresTotal)
-	if err != nil {
-		klog.Fatalf("Failed to parse flags: %v", err)
-	}
-	minMemoryTotal, maxMemoryTotal, err := parseMinMaxFlag(*memoryTotal)
-	if err != nil {
-		klog.Fatalf("Failed to parse flags: %v", err)
-	}
-	// Convert memory limits to bytes.
-	minMemoryTotal = minMemoryTotal * units.GiB
-	maxMemoryTotal = maxMemoryTotal * units.GiB
-
-	parsedGpuTotal, err := parseMultipleGpuLimits(*gpuTotal)
-	if err != nil {
-		klog.Fatalf("Failed to parse flags: %v", err)
-	}
-	return config.AutoscalingOptions{
-		NodeGroupDefaults: config.NodeGroupAutoscalingOptions{
-			ScaleDownUtilizationThreshold:    *scaleDownUtilizationThreshold,
-			ScaleDownGpuUtilizationThreshold: *scaleDownGpuUtilizationThreshold,
-			ScaleDownUnneededTime:            *scaleDownUnneededTime,
-			ScaleDownUnreadyTime:             *scaleDownUnreadyTime,
-		},
-		CloudConfig:                        *cloudConfig,
-		CloudProviderName:                  *cloudProviderFlag,
-		NodeGroupAutoDiscovery:             *nodeGroupAutoDiscoveryFlag,
-		MaxTotalUnreadyPercentage:          *maxTotalUnreadyPercentage,
-		OkTotalUnreadyCount:                *okTotalUnreadyCount,
-		ScaleUpFromZero:                    *scaleUpFromZero,
-		EstimatorName:                      *estimatorFlag,
-		ExpanderNames:                      *expanderFlag,
-		IgnoreDaemonSetsUtilization:        *ignoreDaemonSetsUtilization,
-		IgnoreMirrorPodsUtilization:        *ignoreMirrorPodsUtilization,
-		MaxBulkSoftTaintCount:              *maxBulkSoftTaintCount,
-		MaxBulkSoftTaintTime:               *maxBulkSoftTaintTime,
-		MaxEmptyBulkDelete:                 *maxEmptyBulkDeleteFlag,
-		MaxGracefulTerminationSec:          *maxGracefulTerminationFlag,
-		MaxNodeProvisionTime:               *maxNodeProvisionTime,
-		MaxNodesTotal:                      *maxNodesTotal,
-		MaxCoresTotal:                      maxCoresTotal,
-		MinCoresTotal:                      minCoresTotal,
-		MaxMemoryTotal:                     maxMemoryTotal,
-		MinMemoryTotal:                     minMemoryTotal,
-		GpuTotal:                           parsedGpuTotal,
-		NodeGroups:                         *nodeGroupsFlag,
-		ScaleDownDelayAfterAdd:             *scaleDownDelayAfterAdd,
-		ScaleDownDelayAfterDelete:          *scaleDownDelayAfterDelete,
-		ScaleDownDelayAfterFailure:         *scaleDownDelayAfterFailure,
-		ScaleDownEnabled:                   *scaleDownEnabled,
-		ScaleDownNonEmptyCandidatesCount:   *scaleDownNonEmptyCandidatesCount,
-		ScaleDownCandidatesPoolRatio:       *scaleDownCandidatesPoolRatio,
-		ScaleDownCandidatesPoolMinCount:    *scaleDownCandidatesPoolMinCount,
-		WriteStatusConfigMap:               *writeStatusConfigMapFlag,
-		StatusConfigMapName:                *statusConfigMapName,
-		BalanceSimilarNodeGroups:           *balanceSimilarNodeGroupsFlag,
-		ConfigNamespace:                    *namespace,
-		ClusterName:                        *clusterName,
-		NodeAutoprovisioningEnabled:        *nodeAutoprovisioningEnabled,
-		MaxAutoprovisionedNodeGroupCount:   *maxAutoprovisionedNodeGroupCount,
-		UnremovableNodeRecheckTimeout:      *unremovableNodeRecheckTimeout,
-		ExpendablePodsPriorityCutoff:       *expendablePodsPriorityCutoff,
-		Regional:                           *regional,
-		NewPodScaleUpDelay:                 *newPodScaleUpDelay,
-		IgnoredTaints:                      *ignoreTaintsFlag,
-		BalancingExtraIgnoredLabels:        *balancingIgnoreLabelsFlag,
-		KubeConfigPath:                     *kubeConfigFile,
-		NodeDeletionDelayTimeout:           *nodeDeletionDelayTimeout,
-		AWSUseStaticInstanceList:           *awsUseStaticInstanceList,
-		ConcurrentGceRefreshes:             *concurrentGceRefreshes,
-		ClusterAPICloudConfigAuthoritative: *clusterAPICloudConfigAuthoritative,
-		CordonNodeBeforeTerminate:          *cordonNodeBeforeTerminate,
-		DaemonSetEvictionForEmptyNodes:     *daemonSetEvictionForEmptyNodes,
-		DaemonSetEvictionForOccupiedNodes:  *daemonSetEvictionForOccupiedNodes,
-		UserAgent:                          *userAgent,
-	}
-}
-
-func getKubeConfig() *rest.Config {
-	if *kubeConfigFile != "" {
-		klog.V(1).Infof("Using kubeconfig file: %s", *kubeConfigFile)
-		// use the current context in kubeconfig
-		config, err := clientcmd.BuildConfigFromFlags("", *kubeConfigFile)
-		if err != nil {
-			klog.Fatalf("Failed to build config: %v", err)
-		}
-		return config
-	}
-	url, err := url.Parse(*kubernetes)
-	if err != nil {
-		klog.Fatalf("Failed to parse Kubernetes url: %v", err)
-	}
-
-	kubeConfig, err := config.GetKubeClientConfig(url)
-	if err != nil {
-		klog.Fatalf("Failed to build Kubernetes client configuration: %v", err)
-	}
-
-	return kubeConfig
-}
-
-func createKubeClient(kubeConfig *rest.Config) kube_client.Interface {
-	return kube_client.NewForConfigOrDie(kubeConfig)
-}
 
 func registerSignalHandlers(autoscaler core.Autoscaler) {
 	sigs := make(chan os.Signal, 1)
@@ -307,52 +95,179 @@ func registerSignalHandlers(autoscaler core.Autoscaler) {
 	}()
 }
 
-func buildAutoscaler(debuggingSnapshotter debuggingsnapshot.DebuggingSnapshotter) (core.Autoscaler, error) {
-	// Create basic config from flags.
-	autoscalingOptions := createAutoscalingOptions()
-	kubeClient := createKubeClient(getKubeConfig())
-	eventsKubeClient := createKubeClient(getKubeConfig())
+func buildAutoscaler(context ctx.Context, debuggingSnapshotter debuggingsnapshot.DebuggingSnapshotter) (core.Autoscaler, *loop.LoopTrigger, error) {
+	// Get AutoscalingOptions from flags.
+	autoscalingOptions := flags.AutoscalingOptions()
 
+	kubeClient := kube_util.CreateKubeClient(autoscalingOptions.KubeClientOpts)
+
+	// Informer transform to trim ManagedFields for memory efficiency.
+	trim := func(obj interface{}) (interface{}, error) {
+		if accessor, err := meta.Accessor(obj); err == nil {
+			accessor.SetManagedFields(nil)
+		}
+		return obj, nil
+	}
+	informerFactory := informers.NewSharedInformerFactoryWithOptions(kubeClient, 0, informers.WithTransform(trim))
+
+	fwHandle, err := framework.NewHandle(informerFactory, autoscalingOptions.SchedulerConfig, autoscalingOptions.DynamicResourceAllocationEnabled)
+	if err != nil {
+		return nil, nil, err
+	}
+	deleteOptions := options.NewNodeDeleteOptions(autoscalingOptions)
+	drainabilityRules := rules.Default(deleteOptions)
+
+	var snapshotStore clustersnapshot.ClusterSnapshotStore = store.NewDeltaSnapshotStore(autoscalingOptions.ClusterSnapshotParallelism)
 	opts := core.AutoscalerOptions{
 		AutoscalingOptions:   autoscalingOptions,
-		ClusterSnapshot:      simulator.NewDeltaClusterSnapshot(),
+		FrameworkHandle:      fwHandle,
+		ClusterSnapshot:      predicate.NewPredicateSnapshot(snapshotStore, fwHandle, autoscalingOptions.DynamicResourceAllocationEnabled),
 		KubeClient:           kubeClient,
-		EventsKubeClient:     eventsKubeClient,
+		InformerFactory:      informerFactory,
 		DebuggingSnapshotter: debuggingSnapshotter,
+		DeleteOptions:        deleteOptions,
+		DrainabilityRules:    drainabilityRules,
+		ScaleUpOrchestrator:  orchestrator.New(),
 	}
 
-	opts.Processors = ca_processors.DefaultProcessors()
-	opts.Processors.PodListProcessor = core.NewFilterOutSchedulablePodListProcessor()
+	opts.Processors = ca_processors.DefaultProcessors(autoscalingOptions)
+	opts.Processors.TemplateNodeInfoProvider = nodeinfosprovider.NewDefaultTemplateNodeInfoProvider(&autoscalingOptions.NodeInfoCacheExpireTime, autoscalingOptions.ForceDaemonSets)
+	podListProcessor := podlistprocessor.NewDefaultPodListProcessor(scheduling.ScheduleAnywhere)
 
-	nodeInfoComparatorBuilder := nodegroupset.CreateGenericNodeInfoComparator
-	if autoscalingOptions.CloudProviderName == cloudprovider.AzureProviderName {
-		nodeInfoComparatorBuilder = nodegroupset.CreateAzureNodeInfoComparator
-	} else if autoscalingOptions.CloudProviderName == cloudprovider.AwsProviderName {
-		nodeInfoComparatorBuilder = nodegroupset.CreateAwsNodeInfoComparator
-	} else if autoscalingOptions.CloudProviderName == cloudprovider.GceProviderName {
-		nodeInfoComparatorBuilder = nodegroupset.CreateGceNodeInfoComparator
-	} else if autoscalingOptions.CloudProviderName == cloudprovider.ClusterAPIProviderName {
-		nodeInfoComparatorBuilder = nodegroupset.CreateClusterAPINodeInfoComparator
+	var ProvisioningRequestInjector *provreq.ProvisioningRequestPodsInjector
+	if autoscalingOptions.ProvisioningRequestEnabled {
+		podListProcessor.AddProcessor(provreq.NewProvisioningRequestPodsFilter(provreq.NewDefautlEventManager()))
+
+		restConfig := kube_util.GetKubeConfig(autoscalingOptions.KubeClientOpts)
+		client, err := provreqclient.NewProvisioningRequestClient(restConfig)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		ProvisioningRequestInjector, err = provreq.NewProvisioningRequestPodsInjector(restConfig, opts.ProvisioningRequestInitialBackoffTime, opts.ProvisioningRequestMaxBackoffTime, opts.ProvisioningRequestMaxBackoffCacheSize, opts.CheckCapacityBatchProcessing, opts.CheckCapacityProcessorInstance)
+		if err != nil {
+			return nil, nil, err
+		}
+		podListProcessor.AddProcessor(ProvisioningRequestInjector)
+
+		var provisioningRequestPodsInjector *provreq.ProvisioningRequestPodsInjector
+		if autoscalingOptions.CheckCapacityBatchProcessing {
+			klog.Infof("Batch processing for check capacity requests is enabled. Passing provisioning request injector to check capacity processor.")
+			provisioningRequestPodsInjector = ProvisioningRequestInjector
+		}
+
+		provreqOrchestrator := provreqorchestrator.New(client, []provreqorchestrator.ProvisioningClass{
+			checkcapacity.New(client, provisioningRequestPodsInjector),
+			besteffortatomic.New(client),
+		})
+
+		scaleUpOrchestrator := provreqorchestrator.NewWrapperOrchestrator(provreqOrchestrator)
+		opts.ScaleUpOrchestrator = scaleUpOrchestrator
+		provreqProcesor := provreq.NewProvReqProcessor(client, opts.CheckCapacityProcessorInstance)
+		opts.LoopStartNotifier = loopstart.NewObserversList([]loopstart.Observer{provreqProcesor})
+
+		podListProcessor.AddProcessor(provreqProcesor)
+
+		opts.Processors.ScaleUpEnforcer = provreq.NewProvisioningRequestScaleUpEnforcer()
+	}
+
+	if autoscalingOptions.ProactiveScaleupEnabled {
+		podInjectionBackoffRegistry := podinjectionbackoff.NewFakePodControllerRegistry()
+
+		podInjectionPodListProcessor := podinjection.NewPodInjectionPodListProcessor(podInjectionBackoffRegistry)
+		enforceInjectedPodsLimitProcessor := podinjection.NewEnforceInjectedPodsLimitProcessor(autoscalingOptions.PodInjectionLimit)
+
+		podListProcessor = pods.NewCombinedPodListProcessor([]pods.PodListProcessor{podInjectionPodListProcessor, podListProcessor, enforceInjectedPodsLimitProcessor})
+
+		// FakePodsScaleUpStatusProcessor processor needs to be the first processor in ScaleUpStatusProcessor before the default processor
+		// As it filters out fake pods from Scale Up status so that we don't emit events.
+		opts.Processors.ScaleUpStatusProcessor = status.NewCombinedScaleUpStatusProcessor([]status.ScaleUpStatusProcessor{podinjection.NewFakePodsScaleUpStatusProcessor(podInjectionBackoffRegistry), opts.Processors.ScaleUpStatusProcessor})
+	}
+
+	opts.Processors.PodListProcessor = podListProcessor
+	sdCandidatesSorting := previouscandidates.NewPreviousCandidates()
+	scaleDownCandidatesComparers := []scaledowncandidates.CandidatesComparer{
+		emptycandidates.NewEmptySortingProcessor(emptycandidates.NewNodeInfoGetter(opts.ClusterSnapshot), deleteOptions, drainabilityRules),
+		sdCandidatesSorting,
+	}
+	opts.Processors.ScaleDownCandidatesNotifier.Register(sdCandidatesSorting)
+
+	cp := scaledowncandidates.NewCombinedScaleDownCandidatesProcessor()
+	cp.Register(scaledowncandidates.NewScaleDownCandidatesSortingProcessor(scaleDownCandidatesComparers))
+
+	if autoscalingOptions.ScaleDownDelayTypeLocal {
+		sdp := scaledowncandidates.NewScaleDownCandidatesDelayProcessor()
+		cp.Register(sdp)
+		opts.Processors.ScaleStateNotifier.Register(sdp)
+
+	}
+	opts.Processors.ScaleDownNodeProcessor = cp
+
+	var nodeInfoComparator nodegroupset.NodeInfoComparator
+	if len(autoscalingOptions.BalancingLabels) > 0 {
+		nodeInfoComparator = nodegroupset.CreateLabelNodeInfoComparator(autoscalingOptions.BalancingLabels)
+	} else {
+		nodeInfoComparatorBuilder := nodegroupset.CreateGenericNodeInfoComparator
+		if autoscalingOptions.CloudProviderName == cloudprovider.AzureProviderName {
+			nodeInfoComparatorBuilder = nodegroupset.CreateAzureNodeInfoComparator
+		} else if autoscalingOptions.CloudProviderName == cloudprovider.AwsProviderName {
+			nodeInfoComparatorBuilder = nodegroupset.CreateAwsNodeInfoComparator
+			opts.Processors.TemplateNodeInfoProvider = nodeinfosprovider.NewAsgTagResourceNodeInfoProvider(&autoscalingOptions.NodeInfoCacheExpireTime, autoscalingOptions.ForceDaemonSets)
+		} else if autoscalingOptions.CloudProviderName == cloudprovider.GceProviderName {
+			nodeInfoComparatorBuilder = nodegroupset.CreateGceNodeInfoComparator
+			opts.Processors.TemplateNodeInfoProvider = nodeinfosprovider.NewAnnotationNodeInfoProvider(&autoscalingOptions.NodeInfoCacheExpireTime, autoscalingOptions.ForceDaemonSets)
+		}
+		nodeInfoComparator = nodeInfoComparatorBuilder(autoscalingOptions.BalancingExtraIgnoredLabels, autoscalingOptions.NodeGroupSetRatios)
 	}
 
 	opts.Processors.NodeGroupSetProcessor = &nodegroupset.BalancingNodeGroupSetProcessor{
-		Comparator: nodeInfoComparatorBuilder(autoscalingOptions.BalancingExtraIgnoredLabels),
+		Comparator: nodeInfoComparator,
 	}
 
 	// These metrics should be published only once.
-	metrics.UpdateNapEnabled(autoscalingOptions.NodeAutoprovisioningEnabled)
-	metrics.UpdateMaxNodesCount(autoscalingOptions.MaxNodesTotal)
 	metrics.UpdateCPULimitsCores(autoscalingOptions.MinCoresTotal, autoscalingOptions.MaxCoresTotal)
 	metrics.UpdateMemoryLimitsBytes(autoscalingOptions.MinMemoryTotal, autoscalingOptions.MaxMemoryTotal)
 
+	// Initialize metrics.
+	metrics.InitMetrics()
+
 	// Create autoscaler.
-	return core.NewAutoscaler(opts)
+	autoscaler, err := core.NewAutoscaler(opts, informerFactory)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Start informers. This must come after fully constructing the autoscaler because
+	// additional informers might have been registered in the factory during NewAutoscaler.
+	stop := make(chan struct{})
+	informerFactory.Start(stop)
+
+	klog.Info("Initializing resource informers, blocking until caches are synced")
+	informersSynced := informerFactory.WaitForCacheSync(stop)
+	for _, synced := range informersSynced {
+		if !synced {
+			return nil, nil, fmt.Errorf("unable to start and sync resource informers")
+		}
+	}
+
+	podObserver := loop.StartPodObserver(context, kube_util.CreateKubeClient(autoscalingOptions.KubeClientOpts))
+
+	// A ProvisioningRequestPodsInjector is used as provisioningRequestProcessingTimesGetter here to obtain the last time a
+	// ProvisioningRequest was processed. This is because the ProvisioningRequestPodsInjector in addition to injecting pods
+	// also marks the ProvisioningRequest as accepted or failed.
+	trigger := loop.NewLoopTrigger(autoscaler, ProvisioningRequestInjector, podObserver, autoscalingOptions.ScanInterval)
+
+	return autoscaler, trigger, nil
 }
 
 func run(healthCheck *metrics.HealthCheck, debuggingSnapshotter debuggingsnapshot.DebuggingSnapshotter) {
-	metrics.RegisterAll(*emitPerNodeGroupMetrics)
+	autoscalingOpts := flags.AutoscalingOptions()
 
-	autoscaler, err := buildAutoscaler(debuggingSnapshotter)
+	metrics.RegisterAll(autoscalingOpts.EmitPerNodeGroupMetrics)
+	context, cancel := ctx.WithCancel(ctx.Background())
+	defer cancel()
+
+	autoscaler, trigger, err := buildAutoscaler(context, debuggingSnapshotter)
 	if err != nil {
 		klog.Fatalf("Failed to create autoscaler: %v", err)
 	}
@@ -369,23 +284,20 @@ func run(healthCheck *metrics.HealthCheck, debuggingSnapshotter debuggingsnapsho
 	}
 
 	// Autoscale ad infinitum.
-	for {
-		select {
-		case <-time.After(*scanInterval):
-			{
-				loopStart := time.Now()
-				metrics.UpdateLastTime(metrics.Main, loopStart)
-				healthCheck.UpdateLastActivity(loopStart)
-
-				err := autoscaler.RunOnce(loopStart)
-				if err != nil && err.Type() != errors.TransientError {
-					metrics.RegisterError(err)
-				} else {
-					healthCheck.UpdateLastSuccessfulRun(time.Now())
-				}
-
-				metrics.UpdateDurationFromStart(metrics.Main, loopStart)
-			}
+	if autoscalingOpts.FrequentLoopsEnabled {
+		// We need to have two timestamps because the scaleUp activity alternates between processing ProvisioningRequests,
+		// so we need to pass the older timestamp (previousRun) to trigger.Wait to run immediately if only one of the activities is productive.
+		lastRun := time.Now()
+		previousRun := time.Now()
+		for {
+			trigger.Wait(previousRun)
+			previousRun, lastRun = lastRun, time.Now()
+			loop.RunAutoscalerOnce(autoscaler, healthCheck, lastRun)
+		}
+	} else {
+		for {
+			time.Sleep(autoscalingOpts.ScanInterval)
+			loop.RunAutoscalerOnce(autoscaler, healthCheck, time.Now())
 		}
 	}
 }
@@ -393,18 +305,42 @@ func run(healthCheck *metrics.HealthCheck, debuggingSnapshotter debuggingsnapsho
 func main() {
 	klog.InitFlags(nil)
 
-	leaderElection := defaultLeaderElectionConfiguration()
-	leaderElection.LeaderElect = true
+	featureGate := utilfeature.DefaultMutableFeatureGate
+	loggingConfig := logsapi.NewLoggingConfiguration()
 
-	options.BindLeaderElectionFlags(&leaderElection, pflag.CommandLine)
-	utilfeature.DefaultMutableFeatureGate.AddFlag(pflag.CommandLine)
+	if err := logsapi.AddFeatureGates(featureGate); err != nil {
+		klog.Fatalf("Failed to add logging feature flags: %v", err)
+	}
+
+	leaderElection := leaderElectionConfiguration()
+	// Must be called before kube_flag.InitFlags() to ensure leader election flags are parsed and available.
+	componentopts.BindLeaderElectionFlags(&leaderElection, pflag.CommandLine)
+
+	logsapi.AddFlags(loggingConfig, pflag.CommandLine)
+	featureGate.AddFlag(pflag.CommandLine)
 	kube_flag.InitFlags()
 
-	healthCheck := metrics.NewHealthCheck(*maxInactivityTimeFlag, *maxFailingTimeFlag)
+	autoscalingOpts := flags.AutoscalingOptions()
+
+	// If the DRA flag is passed, we need to set the DRA feature gate as well. The selection of scheduler plugins for the default
+	// scheduling profile depends on feature gates, and the DRA plugin is only included if the DRA feature gate is enabled. The DRA
+	// plugin itself also checks the DRA feature gate and doesn't do anything if it's not enabled.
+	if autoscalingOpts.DynamicResourceAllocationEnabled && !featureGate.Enabled(features.DynamicResourceAllocation) {
+		if err := featureGate.SetFromMap(map[string]bool{string(features.DynamicResourceAllocation): true}); err != nil {
+			klog.Fatalf("couldn't enable the DRA feature gate: %v", err)
+		}
+	}
+
+	logs.InitLogs()
+	if err := logsapi.ValidateAndApply(loggingConfig, featureGate); err != nil {
+		klog.Fatalf("Failed to validate and apply logging configuration: %v", err)
+	}
+
+	healthCheck := metrics.NewHealthCheck(autoscalingOpts.MaxInactivityTime, autoscalingOpts.MaxFailingTime)
 
 	klog.V(1).Infof("Cluster Autoscaler %s", version.ClusterAutoscalerVersion)
 
-	debuggingSnapshotter := debuggingsnapshot.NewDebuggingSnapshotter(*debuggingSnapshotEnabled)
+	debuggingSnapshotter := debuggingsnapshot.NewDebuggingSnapshotter(autoscalingOpts.DebuggingSnapshotEnabled)
 
 	go func() {
 		pathRecorderMux := mux.NewPathRecorderMux("cluster-autoscaler")
@@ -412,14 +348,14 @@ func main() {
 		pathRecorderMux.HandleFunc("/metrics", func(w http.ResponseWriter, req *http.Request) {
 			defaultMetricsHandler(w, req)
 		})
-		if *debuggingSnapshotEnabled {
+		if autoscalingOpts.DebuggingSnapshotEnabled {
 			pathRecorderMux.HandleFunc("/snapshotz", debuggingSnapshotter.ResponseHandler)
 		}
 		pathRecorderMux.HandleFunc("/health-check", healthCheck.ServeHTTP)
-		if *enableProfiling {
+		if autoscalingOpts.EnableProfiling {
 			routes.Profiling{}.Install(pathRecorderMux)
 		}
-		err := http.ListenAndServe(*address, pathRecorderMux)
+		err := http.ListenAndServe(autoscalingOpts.Address, pathRecorderMux)
 		klog.Fatalf("Failed to start metrics: %v", err)
 	}()
 
@@ -431,7 +367,7 @@ func main() {
 			klog.Fatalf("Unable to get hostname: %v", err)
 		}
 
-		kubeClient := createKubeClient(getKubeConfig())
+		kubeClient := kube_util.CreateKubeClient(autoscalingOpts.KubeClientOpts)
 
 		// Validate that the client is ok.
 		_, err = kubeClient.CoreV1().Nodes().List(ctx.TODO(), metav1.ListOptions{})
@@ -441,13 +377,13 @@ func main() {
 
 		lock, err := resourcelock.New(
 			leaderElection.ResourceLock,
-			*namespace,
+			autoscalingOpts.ConfigNamespace,
 			leaderElection.ResourceName,
 			kubeClient.CoreV1(),
 			kubeClient.CoordinationV1(),
 			resourcelock.ResourceLockConfig{
 				Identity:      id,
-				EventRecorder: kube_util.CreateEventRecorder(kubeClient),
+				EventRecorder: kube_util.CreateEventRecorder(kubeClient, autoscalingOpts.RecordDuplicatedEvents),
 			},
 		)
 		if err != nil {
@@ -474,9 +410,9 @@ func main() {
 	}
 }
 
-func defaultLeaderElectionConfiguration() componentbaseconfig.LeaderElectionConfiguration {
+func leaderElectionConfiguration() componentbaseconfig.LeaderElectionConfiguration {
 	return componentbaseconfig.LeaderElectionConfiguration{
-		LeaderElect:   false,
+		LeaderElect:   true,
 		LeaseDuration: metav1.Duration{Duration: defaultLeaseDuration},
 		RenewDeadline: metav1.Duration{Duration: defaultRenewDeadline},
 		RetryPeriod:   metav1.Duration{Duration: defaultRetryPeriod},
@@ -490,84 +426,3 @@ const (
 	defaultRenewDeadline = 10 * time.Second
 	defaultRetryPeriod   = 2 * time.Second
 )
-
-func parseMinMaxFlag(flag string) (int64, int64, error) {
-	tokens := strings.SplitN(flag, ":", 2)
-	if len(tokens) != 2 {
-		return 0, 0, fmt.Errorf("wrong nodes configuration: %s", flag)
-	}
-
-	min, err := strconv.ParseInt(tokens[0], 10, 64)
-	if err != nil {
-		return 0, 0, fmt.Errorf("failed to set min size: %s, expected integer, err: %v", tokens[0], err)
-	}
-
-	max, err := strconv.ParseInt(tokens[1], 10, 64)
-	if err != nil {
-		return 0, 0, fmt.Errorf("failed to set max size: %s, expected integer, err: %v", tokens[1], err)
-	}
-
-	err = validateMinMaxFlag(min, max)
-	if err != nil {
-		return 0, 0, err
-	}
-
-	return min, max, nil
-}
-
-func validateMinMaxFlag(min, max int64) error {
-	if min < 0 {
-		return fmt.Errorf("min size must be greater or equal to  0")
-	}
-	if max < min {
-		return fmt.Errorf("max size must be greater or equal to min size")
-	}
-	return nil
-}
-
-func minMaxFlagString(min, max int64) string {
-	return fmt.Sprintf("%v:%v", min, max)
-}
-
-func parseMultipleGpuLimits(flags MultiStringFlag) ([]config.GpuLimits, error) {
-	parsedFlags := make([]config.GpuLimits, 0, len(flags))
-	for _, flag := range flags {
-		parsedFlag, err := parseSingleGpuLimit(flag)
-		if err != nil {
-			return nil, err
-		}
-		parsedFlags = append(parsedFlags, parsedFlag)
-	}
-	return parsedFlags, nil
-}
-
-func parseSingleGpuLimit(limits string) (config.GpuLimits, error) {
-	parts := strings.Split(limits, ":")
-	if len(parts) != 3 {
-		return config.GpuLimits{}, fmt.Errorf("incorrect gpu limit specification: %v", limits)
-	}
-	gpuType := parts[0]
-	minVal, err := strconv.ParseInt(parts[1], 10, 64)
-	if err != nil {
-		return config.GpuLimits{}, fmt.Errorf("incorrect gpu limit - min is not integer: %v", limits)
-	}
-	maxVal, err := strconv.ParseInt(parts[2], 10, 64)
-	if err != nil {
-		return config.GpuLimits{}, fmt.Errorf("incorrect gpu limit - max is not integer: %v", limits)
-	}
-	if minVal < 0 {
-		return config.GpuLimits{}, fmt.Errorf("incorrect gpu limit - min is less than 0; %v", limits)
-	}
-	if maxVal < 0 {
-		return config.GpuLimits{}, fmt.Errorf("incorrect gpu limit - max is less than 0; %v", limits)
-	}
-	if minVal > maxVal {
-		return config.GpuLimits{}, fmt.Errorf("incorrect gpu limit - min is greater than max; %v", limits)
-	}
-	parsedGpuLimits := config.GpuLimits{
-		GpuType: gpuType,
-		Min:     minVal,
-		Max:     maxVal,
-	}
-	return parsedGpuLimits, nil
-}

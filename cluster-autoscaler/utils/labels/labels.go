@@ -23,7 +23,12 @@ import (
 
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	kubeletapis "k8s.io/kubelet/pkg/apis"
+	podutils "k8s.io/autoscaler/cluster-autoscaler/utils/pod"
+)
+
+const (
+	// SystemNodeCriticalLabel is a label that marks critical pods with the highest priority.
+	SystemNodeCriticalLabel = "system-node-critical"
 )
 
 var (
@@ -84,12 +89,9 @@ func calculateNodeSelectorStats(pods []*apiv1.Pod) []nodeSelectorStats {
 	stats := make([]nodeSelectorStats, 0)
 	for _, pod := range pods {
 		var podCpu resource.Quantity
-		for _, container := range pod.Spec.Containers {
-			if container.Resources.Requests != nil {
-				containerCpu := container.Resources.Requests[apiv1.ResourceCPU]
-				podCpu.Add(containerCpu)
-			}
-		}
+		podRequests := podutils.PodRequests(pod)
+		podCpu.Add(podRequests[apiv1.ResourceCPU])
+
 		if podCpu.MilliValue() == 0 {
 			podCpu = defaultMinCPU
 		}
@@ -119,12 +121,6 @@ func calculateNodeSelectorStats(pods []*apiv1.Pod) []nodeSelectorStats {
 
 // UpdateDeprecatedLabels updates beta and deprecated labels from stable labels
 func UpdateDeprecatedLabels(labels map[string]string) {
-	if v, ok := labels[apiv1.LabelArchStable]; ok {
-		labels[kubeletapis.LabelArch] = v
-	}
-	if v, ok := labels[apiv1.LabelOSStable]; ok {
-		labels[kubeletapis.LabelOS] = v
-	}
 	if v, ok := labels[apiv1.LabelInstanceTypeStable]; ok {
 		labels[apiv1.LabelInstanceType] = v
 	}

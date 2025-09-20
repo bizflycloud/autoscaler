@@ -31,13 +31,13 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
+	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/gce/localssdsize"
 	"k8s.io/autoscaler/cluster-autoscaler/config"
 	"k8s.io/autoscaler/cluster-autoscaler/config/dynamic"
-	"k8s.io/autoscaler/cluster-autoscaler/utils/units"
 	"k8s.io/client-go/util/workqueue"
 
 	apiv1 "k8s.io/api/core/v1"
-	provider_gce "k8s.io/legacy-cloud-providers/gce"
+	provider_gce "k8s.io/cloud-provider-gcp/providers/gce"
 
 	"cloud.google.com/go/compute/metadata"
 	"golang.org/x/oauth2"
@@ -50,7 +50,7 @@ import (
 const (
 	refreshInterval              = 1 * time.Minute
 	machinesRefreshInterval      = 1 * time.Hour
-	httpTimeout                  = 30 * time.Second
+	httpTimeout                  = 3 * time.Minute
 	scaleToZeroSupported         = true
 	autoDiscovererTypeMIG        = "mig"
 	migAutoDiscovererKeyPrefix   = "namePrefix"
@@ -83,7 +83,7 @@ type GceManager interface {
 	// GetMigs returns list of registered MIGs.
 	GetMigs() []Mig
 	// GetMigNodes returns mig nodes.
-	GetMigNodes(mig Mig) ([]cloudprovider.Instance, error)
+	GetMigNodes(mig Mig) ([]GceInstance, error)
 	// GetMigForInstance returns MIG to which the given instance belongs.
 	GetMigForInstance(instance GceRef) (Mig, error)
 	// GetMigTemplateNode returns a template node for MIG.
@@ -113,18 +113,22 @@ type gceManagerImpl struct {
 	migInfoProvider MigInfoProvider
 	migLister       MigLister
 
-	location              string
-	projectId             string
-	templates             *GceTemplateBuilder
-	interrupt             chan struct{}
-	regional              bool
-	explicitlyConfigured  map[GceRef]bool
-	migAutoDiscoverySpecs []migAutoDiscoveryConfig
-	reserved              *GceReserved
+	location                 string
+	projectId                string
+	domainUrl                string
+	templates                *GceTemplateBuilder
+	interrupt                chan struct{}
+	regional                 bool
+	explicitlyConfigured     map[GceRef]bool
+	migAutoDiscoverySpecs    []migAutoDiscoveryConfig
+	reserved                 *GceReserved
+	localSSDDiskSizeProvider localssdsize.LocalSSDSizeProvider
 }
 
 // CreateGceManager constructs GceManager object.
-func CreateGceManager(configReader io.Reader, discoveryOpts cloudprovider.NodeGroupDiscoveryOptions, regional bool, concurrentGceRefreshes int, userAgent string) (GceManager, error) {
+func CreateGceManager(configReader io.Reader, discoveryOpts cloudprovider.NodeGroupDiscoveryOptions,
+	localSSDDiskSizeProvider localssdsize.LocalSSDSizeProvider,
+	regional, bulkGceMigInstancesListingEnabled bool, concurrentGceRefreshes int, userAgent, domainUrl string, migInstancesMinRefreshWaitTime time.Duration) (GceManager, error) {
 	// Create Google Compute Engine token.
 	var err error
 	tokenSource := google.ComputeTokenSource("")
@@ -172,7 +176,7 @@ func CreateGceManager(configReader io.Reader, discoveryOpts cloudprovider.NodeGr
 	klog.V(1).Infof("GCE projectId=%s location=%s", projectId, location)
 
 	// Create Google Compute Engine service.
-	client := oauth2.NewClient(oauth2.NoContext, tokenSource)
+	client := oauth2.NewClient(context.Background(), tokenSource)
 	client.Timeout = httpTimeout
 	gceService, err := NewAutoscalingGceClientV1(client, projectId, userAgent)
 	if err != nil {
@@ -181,18 +185,20 @@ func CreateGceManager(configReader io.Reader, discoveryOpts cloudprovider.NodeGr
 	cache := NewGceCache()
 	migLister := NewMigLister(cache)
 	manager := &gceManagerImpl{
-		cache:                  cache,
-		GceService:             gceService,
-		migLister:              migLister,
-		migInfoProvider:        NewCachingMigInfoProvider(cache, migLister, gceService, projectId, concurrentGceRefreshes),
-		location:               location,
-		regional:               regional,
-		projectId:              projectId,
-		templates:              &GceTemplateBuilder{},
-		interrupt:              make(chan struct{}),
-		explicitlyConfigured:   make(map[GceRef]bool),
-		concurrentGceRefreshes: concurrentGceRefreshes,
-		reserved:               &GceReserved{},
+		cache:                    cache,
+		GceService:               gceService,
+		migLister:                migLister,
+		migInfoProvider:          NewCachingMigInfoProvider(cache, migLister, gceService, projectId, concurrentGceRefreshes, migInstancesMinRefreshWaitTime, bulkGceMigInstancesListingEnabled),
+		location:                 location,
+		regional:                 regional,
+		projectId:                projectId,
+		templates:                &GceTemplateBuilder{},
+		interrupt:                make(chan struct{}),
+		explicitlyConfigured:     make(map[GceRef]bool),
+		concurrentGceRefreshes:   concurrentGceRefreshes,
+		reserved:                 &GceReserved{},
+		domainUrl:                domainUrl,
+		localSSDDiskSizeProvider: localSSDDiskSizeProvider,
 	}
 
 	if err := manager.fetchExplicitMigs(discoveryOpts.NodeGroupSpecs); err != nil {
@@ -271,6 +277,7 @@ func (m *gceManagerImpl) DeleteInstances(instances []GceRef) error {
 		}
 	}
 	m.cache.InvalidateMigTargetSize(commonMig.GceRef())
+	m.cache.InvalidateMigInstances(commonMig.GceRef())
 	return m.GceService.DeleteInstances(commonMig.GceRef(), instances)
 }
 
@@ -285,7 +292,7 @@ func (m *gceManagerImpl) GetMigForInstance(instance GceRef) (Mig, error) {
 }
 
 // GetMigNodes returns mig nodes.
-func (m *gceManagerImpl) GetMigNodes(mig Mig) ([]cloudprovider.Instance, error) {
+func (m *gceManagerImpl) GetMigNodes(mig Mig) ([]GceInstance, error) {
 	return m.migInfoProvider.GetMigInstances(mig.GceRef())
 }
 
@@ -294,11 +301,19 @@ func (m *gceManagerImpl) Refresh() error {
 	m.cache.InvalidateAllMigInstances()
 	m.cache.InvalidateAllMigTargetSizes()
 	m.cache.InvalidateAllMigBasenames()
+	m.cache.InvalidateAllListManagedInstancesResults()
 	m.cache.InvalidateAllMigInstanceTemplateNames()
 	if m.lastRefresh.Add(refreshInterval).After(time.Now()) {
 		return nil
 	}
-	return m.forceRefresh()
+
+	if err := m.forceRefresh(); err != nil {
+		return err
+	}
+
+	migs := m.migLister.GetMigs()
+	m.cache.DropInstanceTemplatesForMissingMigs(migs)
+	return nil
 }
 
 func (m *gceManagerImpl) CreateInstances(mig Mig, delta int64) error {
@@ -337,19 +352,19 @@ func (m *gceManagerImpl) refreshAutoscalingOptions() {
 	for _, mig := range m.migLister.GetMigs() {
 		template, err := m.migInfoProvider.GetMigInstanceTemplate(mig.GceRef())
 		if err != nil {
-			klog.Warningf("Not evaluating autoscaling options for %q MIG: failed to find corresponding instance template", mig.GceRef(), err)
+			klog.Warningf("Not evaluating autoscaling options for %q MIG: failed to find corresponding instance template: %v", mig.GceRef(), err)
 			continue
 		}
 		if template.Properties == nil {
 			klog.Warningf("Failed to extract autoscaling options from %q metadata: instance template is incomplete", template.Name)
 			continue
 		}
-		kubeEnvValue, err := getKubeEnvValueFromTemplateMetadata(template)
+		kubeEnv, err := m.migInfoProvider.GetMigKubeEnv(mig.GceRef())
 		if err != nil {
 			klog.Warningf("Failed to extract autoscaling options from %q instance template's metadata: can't get KubeEnv: %v", template.Name, err)
 			continue
 		}
-		options, err := extractAutoscalingOptionsFromKubeEnv(kubeEnvValue)
+		options, err := extractAutoscalingOptionsFromKubeEnv(kubeEnv)
 		if err != nil {
 			klog.Warningf("Failed to extract autoscaling options from %q instance template's metadata: %v", template.Name, err)
 			continue
@@ -417,6 +432,7 @@ func (m *gceManagerImpl) buildMigFromSpec(s *dynamic.NodeGroupSpec) (Mig, error)
 		gceManager: m,
 		minSize:    s.MinSize,
 		maxSize:    s.MaxSize,
+		domainUrl:  m.domainUrl,
 	}
 	return mig, nil
 }
@@ -483,8 +499,7 @@ func (m *gceManagerImpl) clearMachinesCache() {
 		return
 	}
 
-	machinesCache := make(map[MachineTypeKey]*gce.MachineType)
-	m.cache.SetMachinesCache(machinesCache)
+	m.cache.InvalidateAllMachines()
 	nextRefresh := time.Now()
 	m.machinesCacheLastRefresh = nextRefresh
 	klog.V(2).Infof("Cleared machine types cache, next clear after %v", nextRefresh)
@@ -577,6 +592,9 @@ func (m *gceManagerImpl) GetMigOptions(mig Mig, defaults config.NodeGroupAutosca
 	if opt, ok := getDurationOption(options, migRef.Name, config.DefaultScaleDownUnreadyTimeKey); ok {
 		defaults.ScaleDownUnreadyTime = opt
 	}
+	if opt, ok := getDurationOption(options, migRef.Name, config.DefaultMaxNodeProvisionTimeKey); ok {
+		defaults.MaxNodeProvisionTime = opt
+	}
 
 	return &defaults
 }
@@ -584,45 +602,22 @@ func (m *gceManagerImpl) GetMigOptions(mig Mig, defaults config.NodeGroupAutosca
 // GetMigTemplateNode constructs a node from GCE instance template of the given MIG.
 func (m *gceManagerImpl) GetMigTemplateNode(mig Mig) (*apiv1.Node, error) {
 	template, err := m.migInfoProvider.GetMigInstanceTemplate(mig.GceRef())
-
 	if err != nil {
 		return nil, err
 	}
-	cpu, mem, err := m.getCpuAndMemoryForMachineType(template.Properties.MachineType, mig.GceRef().Zone)
+	kubeEnv, err := m.migInfoProvider.GetMigKubeEnv(mig.GceRef())
 	if err != nil {
 		return nil, err
 	}
-	return m.templates.BuildNodeFromTemplate(mig, template, cpu, mem, nil, m.reserved)
-}
-
-func (m *gceManagerImpl) getCpuAndMemoryForMachineType(machineType string, zone string) (cpu int64, mem int64, err error) {
-	if strings.HasPrefix(machineType, "custom-") {
-		return parseCustomMachineType(machineType)
-	}
-	machine, _ := m.cache.GetMachineFromCache(machineType, zone)
-	if machine == nil {
-		machine, err = m.GceService.FetchMachineType(zone, machineType)
-		if err != nil {
-			return 0, 0, err
-		}
-		m.cache.AddMachineToCache(machineType, zone, machine)
-	}
-	return machine.GuestCpus, machine.MemoryMb * units.MiB, nil
-}
-
-func parseCustomMachineType(machineType string) (cpu, mem int64, err error) {
-	// example custom-2-2816
-	var count int
-	count, err = fmt.Sscanf(machineType, "custom-%d-%d", &cpu, &mem)
+	machineType, err := m.migInfoProvider.GetMigMachineType(mig.GceRef())
 	if err != nil {
-		return
+		return nil, err
 	}
-	if count != 2 {
-		return 0, 0, fmt.Errorf("failed to parse all params in %s", machineType)
+	migOsInfo, err := m.templates.MigOsInfo(mig.Id(), kubeEnv)
+	if err != nil {
+		return nil, err
 	}
-	// Mb to bytes
-	mem = mem * units.MiB
-	return
+	return m.templates.BuildNodeFromTemplate(mig, migOsInfo, template, kubeEnv, machineType.CPU, machineType.Memory, nil, m.reserved, m.localSSDDiskSizeProvider)
 }
 
 // parseMIGAutoDiscoverySpecs returns any provided NodeGroupAutoDiscoverySpecs
