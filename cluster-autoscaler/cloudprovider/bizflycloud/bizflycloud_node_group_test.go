@@ -317,6 +317,55 @@ func TestNodeGroup_DeleteNodes(t *testing.T) {
 		err := ng.DeleteNodes(nodes)
 		assert.Error(t, err)
 	})
+
+	t.Run("ghost node with valid ProviderID uses fallback", func(t *testing.T) {
+		client := &bizflyClientMock{}
+		ng := testNodeGroup(client, &gobizfly.WorkerPoolWithNodes{
+			ExtendedWorkerPool: gobizfly.ExtendedWorkerPool{
+				WorkerPool: gobizfly.WorkerPool{
+					DesiredSize: 2,
+				},
+			},
+		})
+
+		ghostNodeID := "18ac4cb3-9bf8-4180-afe9-1502c5ef021c"
+		nodes := []*apiv1.Node{
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "ghost-node"},
+				Spec:       apiv1.NodeSpec{ProviderID: "bizflycloud://" + ghostNodeID},
+				// No Labels — ghost VM never joined K8s, never got node-id label
+			},
+		}
+
+		client.On("DeleteClusterWorkerPoolNode", ctx, ng.clusterID, ng.id, ghostNodeID, nil).
+			Return(nil).Once()
+
+		err := ng.DeleteNodes(nodes)
+		assert.NoError(t, err)
+		assert.Equal(t, 1, ng.nodePool.DesiredSize)
+	})
+
+	t.Run("ghost node with empty ProviderID returns error", func(t *testing.T) {
+		client := &bizflyClientMock{}
+		ng := testNodeGroup(client, &gobizfly.WorkerPoolWithNodes{
+			ExtendedWorkerPool: gobizfly.ExtendedWorkerPool{
+				WorkerPool: gobizfly.WorkerPool{
+					DesiredSize: 2,
+				},
+			},
+		})
+
+		nodes := []*apiv1.Node{
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "bad-node"},
+				// No label, no ProviderID
+			},
+		}
+
+		err := ng.DeleteNodes(nodes)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "ProviderID is empty")
+	})
 }
 
 func TestNodeGroup_Nodes(t *testing.T) {

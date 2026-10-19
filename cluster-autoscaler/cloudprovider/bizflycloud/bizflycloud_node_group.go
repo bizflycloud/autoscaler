@@ -20,9 +20,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/bizflycloud/gobizfly"
+	"k8s.io/klog/v2"
 
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
 	"k8s.io/autoscaler/cluster-autoscaler/config"
@@ -34,10 +36,8 @@ const (
 	nodeIDLabel       = bkeLabelNamespace + "/node-id"
 )
 
-var (
-	// ErrNodePoolNotExist is return if no node pool exists for a given cluster ID
-	ErrNodePoolNotExist = errors.New("node pool does not exist")
-)
+// ErrNodePoolNotExist is return if no node pool exists for a given cluster ID
+var ErrNodePoolNotExist = errors.New("node pool does not exist")
 
 // NodeGroup implements cloudprovider.NodeGroup interface. NodeGroup contains
 // configuration info and functions to control a set of nodes that have the
@@ -114,10 +114,29 @@ func (n *NodeGroup) DeleteNodes(nodes []*apiv1.Node) error {
 	for _, node := range nodes {
 		nodeID, ok := node.Labels[nodeIDLabel]
 		if !ok {
-			// CA creates fake node objects to represent upcoming VMs that
-			// haven't registered as nodes yet. We cannot delete the node at
-			// this point.
-			return fmt.Errorf("cannot delete node %q with provider ID %q on node pool %q: node ID label %q is missing", node.Name, node.Spec.ProviderID, n.id, nodeIDLabel)
+			// Ghost VMs that fail bootstrap (e.g. stuck OpenVPN) never join K8s
+			// and therefore never receive the bke.bizflycloud.vn/node-id label.
+			// Fallback: extract the server UUID from node.Spec.ProviderID which
+			// cluster-autoscaler populates as "bizflycloud://<uuid>".
+			providerID := node.Spec.ProviderID
+			if providerID == "" {
+				return fmt.Errorf(
+					"cannot delete node %q on node pool %q: label %q is missing and ProviderID is empty",
+					node.Name, n.id, nodeIDLabel,
+				)
+			}
+			parts := strings.SplitN(providerID, "://", 2)
+			if len(parts) != 2 || parts[1] == "" {
+				return fmt.Errorf(
+					"cannot delete node %q on node pool %q: label %q is missing and ProviderID %q is malformed",
+					node.Name, n.id, nodeIDLabel, providerID,
+				)
+			}
+			nodeID = parts[1]
+			klog.V(4).Infof(
+				"DeleteNodes: node %q missing label %q, using ProviderID-extracted nodeID=%q",
+				node.Name, nodeIDLabel, nodeID,
+			)
 		}
 		err := n.client.DeleteClusterWorkerPoolNode(ctx, n.clusterID, n.id, nodeID)
 		if err != nil {
