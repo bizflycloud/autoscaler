@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bizflycloud/gobizfly/testlib"
+	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/bizflycloud/gobizfly/testlib"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -45,7 +45,7 @@ func TestDomainList(t *testing.T) {
     ]
 }
 `
-		_, _ = fmt.Fprintf(writer, resp)
+		_, _ = fmt.Fprint(writer, resp)
 	})
 	resp, err := client.CDN.List(ctx, &ListOptions{})
 	require.NoError(t, err)

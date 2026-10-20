@@ -12,7 +12,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bizflycloud/gobizfly/testlib"
+	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/bizflycloud/gobizfly/testlib"
 )
 
 func TestVolumeList(t *testing.T) {

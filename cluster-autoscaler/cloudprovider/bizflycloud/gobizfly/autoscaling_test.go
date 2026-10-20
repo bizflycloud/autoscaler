@@ -9,7 +9,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/bizflycloud/gobizfly/testlib"
+	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/bizflycloud/gobizfly/testlib"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
