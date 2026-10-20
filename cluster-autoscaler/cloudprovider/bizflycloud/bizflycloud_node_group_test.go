@@ -175,7 +175,8 @@ func TestNodeGroup_DecreaseTargetSize(t *testing.T) {
 
 		newCount := numberOfNodes + delta
 		client.On("UpdateClusterWorkerPool", ctx, ng.clusterID, ng.id, &gobizfly.UpdateWorkerPoolRequest{
-			DesiredSize: newCount,
+			DesiredSize:    newCount,
+			UpdateStrategy: "target_only",
 		}, nil,
 		).Return(nil).Once()
 
@@ -199,7 +200,8 @@ func TestNodeGroup_DecreaseTargetSize(t *testing.T) {
 		delta := -1
 		newCount := ng.nodePool.DesiredSize + delta
 		client.On("UpdateClusterWorkerPool", ctx, ng.clusterID, ng.id, &gobizfly.UpdateWorkerPoolRequest{
-			DesiredSize: newCount,
+			DesiredSize:    newCount,
+			UpdateStrategy: "target_only",
 		}, nil,
 		).Return(nil).Once()
 
