@@ -317,54 +317,38 @@ func TestNodeGroup_DeleteNodes(t *testing.T) {
 		err := ng.DeleteNodes(nodes)
 		assert.Error(t, err)
 	})
+}
 
-	t.Run("ghost node with valid ProviderID uses fallback", func(t *testing.T) {
-		client := &bizflyClientMock{}
-		ng := testNodeGroup(client, &gobizfly.WorkerPoolWithNodes{
+func TestNodeGroup_DeleteNodes_MissingLabel(t *testing.T) {
+	ctx := context.Background()
+	pool := func() *gobizfly.WorkerPoolWithNodes {
+		return &gobizfly.WorkerPoolWithNodes{
 			ExtendedWorkerPool: gobizfly.ExtendedWorkerPool{
-				WorkerPool: gobizfly.WorkerPool{
-					DesiredSize: 2,
-				},
+				WorkerPool: gobizfly.WorkerPool{DesiredSize: 3},
 			},
-		})
-
-		ghostNodeID := "18ac4cb3-9bf8-4180-afe9-1502c5ef021c"
-		nodes := []*apiv1.Node{
-			{
-				ObjectMeta: metav1.ObjectMeta{Name: "ghost-node"},
-				Spec:       apiv1.NodeSpec{ProviderID: "bizflycloud://" + ghostNodeID},
-				// No Labels — ghost VM never joined K8s, never got node-id label
-			},
+			Nodes: []gobizfly.PoolNode{{ID: "member-1", PhysicalID: "server-uuid-1"}},
 		}
+	}
 
-		client.On("DeleteClusterWorkerPoolNode", ctx, ng.clusterID, ng.id, ghostNodeID, nil).
-			Return(nil).Once()
+	t.Run("ghost node is deleted by member ID resolved from ProviderID", func(t *testing.T) {
+		client := &bizflyClientMock{}
+		ng := testNodeGroup(client, pool())
+		client.On("DeleteClusterWorkerPoolNode", ctx, ng.clusterID, ng.id, "member-1", nil).Return(nil).Once()
 
-		err := ng.DeleteNodes(nodes)
+		err := ng.DeleteNodes([]*apiv1.Node{{Spec: apiv1.NodeSpec{ProviderID: toProviderID("server-uuid-1")}}})
 		assert.NoError(t, err)
-		assert.Equal(t, 1, ng.nodePool.DesiredSize)
+		assert.Equal(t, 2, ng.nodePool.DesiredSize)
+		client.AssertExpectations(t)
 	})
 
-	t.Run("ghost node with empty ProviderID returns error", func(t *testing.T) {
-		client := &bizflyClientMock{}
-		ng := testNodeGroup(client, &gobizfly.WorkerPoolWithNodes{
-			ExtendedWorkerPool: gobizfly.ExtendedWorkerPool{
-				WorkerPool: gobizfly.WorkerPool{
-					DesiredSize: 2,
-				},
-			},
-		})
-
-		nodes := []*apiv1.Node{
-			{
-				ObjectMeta: metav1.ObjectMeta{Name: "bad-node"},
-				// No label, no ProviderID
-			},
+	t.Run("unknown or malformed ProviderID never reaches the API", func(t *testing.T) {
+		for _, providerID := range []string{"", "server-uuid-1", toProviderID("unknown")} {
+			client := &bizflyClientMock{}
+			ng := testNodeGroup(client, pool())
+			err := ng.DeleteNodes([]*apiv1.Node{{Spec: apiv1.NodeSpec{ProviderID: providerID}}})
+			assert.Error(t, err, providerID)
+			client.AssertNotCalled(t, "DeleteClusterWorkerPoolNode")
 		}
-
-		err := ng.DeleteNodes(nodes)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "ProviderID is empty")
 	})
 }
 

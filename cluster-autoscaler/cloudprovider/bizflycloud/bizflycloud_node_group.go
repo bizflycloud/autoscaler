@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/bizflycloud/gobizfly"
@@ -36,8 +35,10 @@ const (
 	nodeIDLabel       = bkeLabelNamespace + "/node-id"
 )
 
-// ErrNodePoolNotExist is return if no node pool exists for a given cluster ID
-var ErrNodePoolNotExist = errors.New("node pool does not exist")
+var (
+	// ErrNodePoolNotExist is return if no node pool exists for a given cluster ID
+	ErrNodePoolNotExist = errors.New("node pool does not exist")
+)
 
 // NodeGroup implements cloudprovider.NodeGroup interface. NodeGroup contains
 // configuration info and functions to control a set of nodes that have the
@@ -114,41 +115,47 @@ func (n *NodeGroup) DeleteNodes(nodes []*apiv1.Node) error {
 	for _, node := range nodes {
 		nodeID, ok := node.Labels[nodeIDLabel]
 		if !ok {
-			// Ghost VMs that fail bootstrap (e.g. stuck OpenVPN) never join K8s
-			// and therefore never receive the bke.bizflycloud.vn/node-id label.
-			// Fallback: extract the server UUID from node.Spec.ProviderID which
-			// cluster-autoscaler populates as "bizflycloud://<uuid>".
-			providerID := node.Spec.ProviderID
-			if providerID == "" {
-				return fmt.Errorf(
-					"cannot delete node %q on node pool %q: label %q is missing and ProviderID is empty",
-					node.Name, n.id, nodeIDLabel,
-				)
+			// CA creates fake node objects for VMs that haven't registered yet
+			// (longUnregistered / ghost nodes), so the node-id label is absent.
+			// The label holds the ASG member (node) ID, which is NOT the server
+			// UUID carried by ProviderID ("bizflycloud://<server-uuid>"), so map
+			// the server UUID back to the pool's member ID instead of passing
+			// the UUID to the delete API.
+			resolved, err := n.nodeIDFromProviderID(node.Spec.ProviderID)
+			if err != nil {
+				return fmt.Errorf("cannot delete node %q on pool %q: label %q is missing: %w",
+					node.Name, n.id, nodeIDLabel, err)
 			}
-			parts := strings.SplitN(providerID, "://", 2)
-			if len(parts) != 2 || parts[1] == "" {
-				return fmt.Errorf(
-					"cannot delete node %q on node pool %q: label %q is missing and ProviderID %q is malformed",
-					node.Name, n.id, nodeIDLabel, providerID,
-				)
-			}
-			nodeID = parts[1]
-			klog.V(4).Infof(
-				"DeleteNodes: node %q missing label %q, using ProviderID-extracted nodeID=%q",
-				node.Name, nodeIDLabel, nodeID,
-			)
+			nodeID = resolved
+			klog.V(4).Infof("DeleteNodes: node %q missing label %q, resolved nodeID=%q from ProviderID %q",
+				node.Name, nodeIDLabel, nodeID, node.Spec.ProviderID)
 		}
-		err := n.client.DeleteClusterWorkerPoolNode(ctx, n.clusterID, n.id, nodeID)
-		if err != nil {
+
+		if err := n.client.DeleteClusterWorkerPoolNode(ctx, n.clusterID, n.id, nodeID); err != nil {
 			return fmt.Errorf("deleting node failed for cluster: %q node pool: %q node: %q: %s",
 				n.clusterID, n.id, nodeID, err)
 		}
 
-		// decrement the count by one  after a successful delete
+		// decrement the count by one after a successful delete
 		n.nodePool.DesiredSize--
 	}
 
 	return nil
+}
+
+// nodeIDFromProviderID returns the ID of the pool member whose server UUID
+// matches the given provider ID.
+func (n *NodeGroup) nodeIDFromProviderID(providerID string) (string, error) {
+	physicalID := toNodeID(providerID)
+	if physicalID == "" || physicalID == providerID {
+		return "", fmt.Errorf("ProviderID %q is empty or malformed", providerID)
+	}
+	for _, member := range n.nodePool.Nodes {
+		if member.PhysicalID == physicalID && member.ID != "" {
+			return member.ID, nil
+		}
+	}
+	return "", fmt.Errorf("no member with server ID %q in pool", physicalID)
 }
 
 // ForceDeleteNodes deletes nodes from the group regardless of constraints.
