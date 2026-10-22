@@ -199,7 +199,7 @@ func (c *Client) NewRequest(ctx context.Context, method, serviceName string, url
 			return nil, err
 		}
 	}
-	req, err := http.NewRequest(method, url, buf)
+	req, err := http.NewRequestWithContext(ctx, method, url, buf)
 	if err != nil {
 		return nil, err
 	}
@@ -236,23 +236,48 @@ func (c *Client) Do(ctx context.Context, req *http.Request) (resp *http.Response
 
 	// If 401, get new token and retry one time.
 	if resp.StatusCode == http.StatusUnauthorized {
+		buf, _ := ioutil.ReadAll(resp.Body)
+		resp.Body.Close()
 		tok, tokErr := c.Token.Refresh(ctx)
 		if tokErr != nil {
-			buf, _ := ioutil.ReadAll(resp.Body)
-			err = fmt.Errorf("%s : %w", string(buf), tokErr)
-			return
+			return nil, fmt.Errorf("%s : %w", string(buf), tokErr)
 		}
 		c.SetKeystoneToken(tok)
+		// The first attempt consumed the body; send it again
+		if req.GetBody != nil {
+			body, bodyErr := req.GetBody()
+			if bodyErr != nil {
+				return nil, bodyErr
+			}
+			req.Body = body
+		}
 		req.Header.Set("X-Auth-Token", c.keystoneToken)
 		resp, err = c.do(ctx, req)
+		if err != nil {
+			// resp is nil here: reading resp.StatusCode below used to panic
+			return nil, err
+		}
 	}
+	return checkResponse(resp)
+}
+
+// doNoRetry sends a request without the 401 refresh: used by the token request itself,
+// otherwise a 401 from the token endpoint recurses Do -> Refresh -> create -> Do.
+func (c *Client) doNoRetry(ctx context.Context, req *http.Request) (*http.Response, error) {
+	resp, err := c.do(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return checkResponse(resp)
+}
+
+func checkResponse(resp *http.Response) (*http.Response, error) {
 	if resp.StatusCode >= http.StatusBadRequest {
 		defer resp.Body.Close()
 		buf, _ := ioutil.ReadAll(resp.Body)
-		err = errorFromStatus(resp.StatusCode, string(buf))
-
+		return resp, errorFromStatus(resp.StatusCode, string(buf))
 	}
-	return
+	return resp, nil
 }
 
 // SetKeystoneToken sets keystone token value, which will be used for authentication.
