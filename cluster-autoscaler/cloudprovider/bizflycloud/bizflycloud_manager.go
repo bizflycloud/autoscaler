@@ -21,7 +21,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
+	"time"
 
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/bizflycloud/gobizfly"
 	klog "k8s.io/klog/v2"
@@ -116,7 +118,14 @@ func newManager(configReader io.Reader) (*Manager, error) {
 		apiUrl = defaultApiUrl
 	}
 
-	bizflyClient, err := gobizfly.NewClient(gobizfly.WithTenantName(username), gobizfly.WithAPIUrl(apiUrl), gobizfly.WithTenantID(tenantId), gobizfly.WithRegionName(region))
+	bizflyClient, err := gobizfly.NewClient(
+		gobizfly.WithTenantName(username),
+		gobizfly.WithAPIUrl(apiUrl),
+		gobizfly.WithTenantID(tenantId),
+		gobizfly.WithRegionName(region),
+		// The default http.Client has no timeout: one hung request would stall the autoscaler loop
+		gobizfly.WithHTTPClient(&http.Client{Timeout: 30 * time.Second}),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("couldn't initialize Bizflycloud client: %s", err)
 	}
