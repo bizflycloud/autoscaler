@@ -209,6 +209,9 @@ func (c *Client) NewRequest(ctx context.Context, method, serviceName string, url
 	req.Header.Add("User-Agent", c.userAgent)
 	req.Header.Add("X-Tenant-Name", c.projectName)
 	req.Header.Add("X-Tenant-Id", c.projectID)
+	// The auth API scopes an application credential by this header; CCM and
+	// Karpenter send it and log in with the same credential.
+	req.Header.Add("X-Project-ID", c.projectID)
 
 	if c.authType == "" {
 		c.authType = defaultAuthType
