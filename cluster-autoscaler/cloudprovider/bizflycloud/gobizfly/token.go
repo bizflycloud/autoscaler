@@ -28,6 +28,7 @@ type TokenCreateRequest struct {
 	ProjectName   string `json:"project_name,omitempty"`
 	AppCredID     string `json:"credential_id,omitempty"`
 	AppCredSecret string `json:"credential_secret,omitempty"`
+	ProjectID     string `json:"project_id,omitempty"`
 }
 
 // Token contains token information.
@@ -60,6 +61,11 @@ func (t *token) Refresh(ctx context.Context) (*Token, error) {
 }
 
 func (t *token) create(ctx context.Context, tcr *TokenCreateRequest) (*Token, error) {
+	// The auth API scopes an application credential by project; without it the
+	// login is rejected with "credential không đúng".
+	if tcr.ProjectID == "" {
+		tcr.ProjectID = t.client.projectID
+	}
 
 	req, err := t.client.NewRequest(ctx, http.MethodPost, authServiceName, tokenPath, tcr)
 	if err != nil {
