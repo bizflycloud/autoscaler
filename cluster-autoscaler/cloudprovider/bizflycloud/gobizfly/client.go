@@ -11,6 +11,8 @@ import (
 	"io/ioutil"
 	"net/http"
 	"net/url"
+	"path"
+	"strings"
 )
 
 const (
@@ -185,7 +187,19 @@ func (c *Client) GetServiceUrl(serviceName string) string {
 			return service.ServiceUrl
 		}
 	}
-	return defaultAPIURL
+	return c.apiBaseURL()
+}
+
+// apiBaseURL is the configured API URL ending in /api. It serves requests made
+// before the service catalog is loaded, the token request first of all:
+// falling back to defaultAPIURL sent a staging credential to production,
+// which rejected it with "credential không đúng".
+func (c *Client) apiBaseURL() string {
+	u := *c.apiURL
+	if !strings.HasSuffix(u.Path, "/api") {
+		u.Path = path.Join(u.Path, "/api")
+	}
+	return u.String()
 }
 
 // NewRequest creates an API request.
