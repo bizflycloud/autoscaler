@@ -71,7 +71,7 @@ func (t *token) create(ctx context.Context, tcr *TokenCreateRequest) (*Token, er
 	if err != nil {
 		return nil, err
 	}
-	resp, err := t.client.Do(ctx, req)
+	resp, err := t.client.doNoRetry(ctx, req)
 	if err != nil {
 		return nil, err
 	}
