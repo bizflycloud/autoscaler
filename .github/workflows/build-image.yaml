@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - master
+    # Release: push a tag vX.Y.Z -> image :vX.Y.Z (paths are not evaluated for tags)
+    tags:
+      - 'v*'
     paths:
       - 'cluster-autoscaler/**'
       - '.github/workflows/build-image.yaml'
@@ -53,6 +56,8 @@ jobs:
           CUSTOM_TAG="${{ github.event.inputs.tag }}"
           if [ -n "$CUSTOM_TAG" ]; then
             echo "tag=$CUSTOM_TAG" >> $GITHUB_OUTPUT
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
           else
             echo "tag=bizflycloud-$(echo ${{ github.sha }} | cut -c1-8)" >> $GITHUB_OUTPUT
           fi
@@ -76,9 +81,10 @@ jobs:
           build-args: |
             GOARCH=amd64
           platforms: linux/amd64
+          # bizflycloud-master follows the master branch only, never a release tag
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_NAME }}:bizflycloud-master
+            ${{ github.ref == 'refs/heads/master' && format('{0}/{1}/{2}:bizflycloud-master', env.REGISTRY, env.IMAGE_NAMESPACE, env.IMAGE_NAME) || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
